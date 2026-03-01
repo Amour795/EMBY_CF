@@ -13,23 +13,55 @@
  */
 
 const MANUAL_REDIRECT_DOMAINS = [
-    'ap-cn01.emby.bangumi.ca',
-    'ap-cn02.emby.bangumi.ca',
-    'ap-cn03.emby.bangumi.ca',
-    'quark.cn', //夸克网盘
-    'mini189.cn', //天翼云盘
-    '189.cn', //天翼云盘
-    'ctyunxs.cn', //天翼云盘
-    'telecomjs.com', //天翼云盘
-    'xunlei.com', //迅雷云盘
-    '115.com', //115
-    '115cdn.com', //115
-    '115cdn.net', //115
-    'uc.cn', //uc
-    'aliyundrive.com', //阿里
-    'aliyundrive.net', //阿里
-    'voicehub.top', //阿里
-    'xiaoya.pro', //小雅
+  // Emby线路
+  'emby.bangumi.ca',
+
+  // 阿里云盘
+  'aliyundrive.com',
+  'aliyundrive.net',
+  'aliyuncs.com',
+  'alicdn.com',
+  'aliyun.com',
+  'cdn.aliyundrive.com',
+
+  // 迅雷
+  'xunlei.com',
+  'xlusercdn.com',
+  'xycdn.com',
+  'sandai.net',
+  'thundercdn.com',
+
+  // 115
+  '115.com',
+  '115cdn.com',
+  '115cdn.net',
+  'anxia.com',
+
+  // 天翼
+  '189.cn',
+  'mini189.cn',
+  'ctyunxs.cn',
+  'cloud.189.cn',
+  'tianyiyun.com',
+  'telecomjs.com',
+
+  // 夸克 / UC
+  'quark.cn',
+  'quarkdrive.cn',
+  'uc.cn',
+  'ucdrive.cn',
+
+  // 小雅
+  'xiaoya.pro',
+
+  // 通用 CDN（强烈建议）
+  'myqcloud.com',
+  'cloudfront.net',
+  'akamaized.net',
+  'fastly.net',
+  'hwcdn.net',
+  'bytecdn.cn',
+  'bdcdn.net'
 ];
 
 
@@ -224,6 +256,7 @@ const FRONTEND_HTML = `
       <div class="footer-text">
         <p>© 2026 Emby 反向代理服务</p>
         <p>本服务仅用于学习和研究目的</p>
+        <p>交流反馈群组: <a href="https://t.me/Dirige_Proxy" target="_blank" style="color: #0070f3; text-decoration: none;">https://t.me/Dirige_Proxy</a></p>
       </div>
     </div>
 

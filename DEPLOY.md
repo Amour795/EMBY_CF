@@ -115,8 +115,8 @@ https://你的worker域名/你的emby服务器地址:端口
 ```
 
 例如：
-- `https://auto.embys.dpdns.org/http://emby.com`
-- `https://auto.embys.dpdns.org/https://emby.com:8096`
+- `https://example.com/http://emby.com`
+- `https://example.com/https://emby.com:8096`
 
 ### 高级配置
 
@@ -129,8 +129,9 @@ https://你的worker域名/你的emby服务器地址:端口
 当启用D1数据库后，系统会自动统计：
 - 播放次数（`/Sessions/Playing` 接口调用）
 - 获取链接次数（`/PlaybackInfo` 接口调用）
+- 直接访问 /stats 端点查看最新的JSON数据
+- 数据存储：按北京时间（UTC+8）按天存储
 
-统计数据按北京时间（UTC+8）按天存储。
 
 ## GitHub 仓库结构
 

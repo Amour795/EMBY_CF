@@ -50,8 +50,8 @@ https://你的worker域名/你的emby服务器地址:端口
 ```
 
 例如：
-- `https://proxy.255432.xyz/http://emby.com`
-- `https://proxy.255432.xyz/https://emby.com:8096`
+- `https://example.com/http://emby.com`
+- `https://example.comhttps://emby.com:8096`
 
 ## 高级配置
 
@@ -85,6 +85,11 @@ https://你的worker域名/你的emby服务器地址:端口
 ## 声明
 
 本工具仅用于学习和研究目的，请勿用于非法用途。使用本工具产生的一切后果由使用者自行承担。
+
+## 交流反馈
+
+- **反馈群组**：[https://t.me/Dirige_Proxy](https://t.me/Dirige_Proxy)
+- 欢迎加入群组讨论使用问题和功能建议
 
 ## 许可证
 
