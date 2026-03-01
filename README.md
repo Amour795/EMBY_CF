@@ -21,7 +21,7 @@
 
 ## 部署方式
 
-### 方式一：GitHub 一键部署
+### 方式一：Cloudflare 一键部署
 
 1. Fork 本仓库
 2. 配置 Cloudflare API 令牌
