@@ -244,7 +244,13 @@ const FRONTEND_HTML = `
               <div id="total-playback-info" class="stat-value">0</div>
             </div>
           </div>
+          <div style="margin-bottom: 20px; color: #666; font-size: 14px;">
+            <p>备注：以上统计数据为最近30天的累计数据</p>
+          </div>
           <h3>每日统计</h3>
+          <div style="margin-bottom: 10px; color: #666; font-size: 14px;">
+            <p>备注：每日统计显示最近10天的数据</p>
+          </div>
           <div id="daily-stats"></div>
           <div class="footer-text" style="margin-top: 20px;">
             <p>数据更新时间: <span id="last-updated">--</span></p>
@@ -288,7 +294,9 @@ const FRONTEND_HTML = `
         if (data.data.dailyStats.length > 0) {
           var tableHTML = '<table class="stats-table"><thead><tr><th>日期</th><th>播放次数</th><th>获取链接次数</th></tr></thead><tbody>';
           
-          data.data.dailyStats.forEach(function(stat) {
+          // 只显示最近10天的数据
+          const recentStats = data.data.dailyStats.slice(0, 10);
+          recentStats.forEach(function(stat) {
             tableHTML += '<tr><td>' + stat.date + '</td><td>' + stat.playing_count + '</td><td>' + stat.playback_info_count + '</td></tr>';
           });
           
@@ -558,19 +566,21 @@ async function handleStatsRequest(env) {
             });
         }
 
-        // 查询所有统计数据
+        // 查询最近10天统计数据（使用北京时间）
         const statsQuery = `
             SELECT * FROM auto_emby_daily_stats 
+            WHERE date >= date(datetime('now', '+8 hours'), '-10 days')
             ORDER BY date DESC
         `;
         const statsResult = await env.DB.prepare(statsQuery).all();
 
-        // 查询总计数据
+        // 查询最近30天总计数据（使用北京时间）
         const totalQuery = `
             SELECT 
                 SUM(playing_count) as total_playing, 
                 SUM(playback_info_count) as total_playback_info 
             FROM auto_emby_daily_stats
+            WHERE date >= date(datetime('now', '+8 hours'), '-30 days')
         `;
         const totalResult = await env.DB.prepare(totalQuery).first();
 
