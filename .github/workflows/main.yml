@@ -17,3 +17,113 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           command: deploy worker.js --name ${{ secrets.CLOUDFLARE_WORKER_NAME }} --compatibility-date 2026-03-01
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Install dependencies
+        run: npm install axios
+      
+      - name: Create Worker Route and DNS Record
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+          CLOUDFLARE_WORKER_NAME: ${{ secrets.CLOUDFLARE_WORKER_NAME }}
+          CUSTOM_DOMAIN: ${{ secrets.CUSTOM_DOMAIN }}
+        run: |
+          node -e "
+          const axios = require('axios');
+          const apiToken = process.env.CLOUDFLARE_API_TOKEN;
+          const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
+          const zoneId = process.env.CLOUDFLARE_ZONE_ID;
+          const workerName = process.env.CLOUDFLARE_WORKER_NAME;
+          const customDomain = process.env.CUSTOM_DOMAIN;
+          
+          if (!apiToken || !accountId || !zoneId || !workerName || !customDomain) {
+            console.error('缺少必要的环境变量');
+            process.exit(1);
+          }
+          
+          const headers = {
+            'Authorization': `Bearer ${apiToken}`,
+            'Content-Type': 'application/json'
+          };
+          
+          // 1. 创建Worker路由
+          async function createWorkerRoute() {
+            try {
+              const response = await axios.post(
+                `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/routes`,
+                {
+                  pattern: `${customDomain}/*`,
+                  script: workerName
+                },
+                { headers }
+              );
+              console.log('Worker路由创建成功:', response.data);
+            } catch (error) {
+              console.error('Worker路由创建失败:', error.response?.data || error.message);
+            }
+          }
+          
+          // 2. 创建DNS记录
+          async function createDNSRecord() {
+            try {
+              // 检查是否已存在A记录
+              const checkResponse = await axios.get(
+                `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records?type=A&name=${customDomain}`,
+                { headers }
+              );
+              
+              if (checkResponse.data.result.length === 0) {
+                // 创建A记录指向192.0.2.1（Cloudflare的占位IP）
+                const response = await axios.post(
+                  `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records`,
+                  {
+                    type: 'A',
+                    name: customDomain,
+                    content: '192.0.2.1',
+                    ttl: 1,
+                    proxied: true
+                  },
+                  { headers }
+                );
+                console.log('DNS记录创建成功:', response.data);
+              } else {
+                console.log('DNS记录已存在，跳过创建');
+              }
+            } catch (error) {
+              console.error('DNS记录创建失败:', error.response?.data || error.message);
+            }
+          }
+          
+          // 3. 运行创建操作
+          (async () => {
+            await createWorkerRoute();
+            await createDNSRecord();
+            console.log('部署流程完成');
+          })();
+          "
+      
+      - name: Display deployment instructions
+        env:
+          CUSTOM_DOMAIN: ${{ secrets.CUSTOM_DOMAIN }}
+        run: |
+          echo "部署完成！"
+          echo "请确保已完成以下步骤："
+          echo "1. 已在Cloudflare中添加自定义域名到您的区域"
+          echo "2. 已将域名的NS记录指向Cloudflare"
+          echo "3. 已在GitHub Secrets中配置以下变量："
+          echo "   - CLOUDFLARE_API_TOKEN: Cloudflare API令牌"
+          echo "   - CLOUDFLARE_ACCOUNT_ID: Cloudflare账户ID"
+          echo "   - CLOUDFLARE_ZONE_ID: Cloudflare区域ID"
+          echo "   - CLOUDFLARE_WORKER_NAME: Worker名称"
+          echo "   - CUSTOM_DOMAIN: 自定义域名"
+          if [ -n "$CUSTOM_DOMAIN" ]; then
+            echo ""
+            echo "您的Worker现在应该可以通过以下地址访问："
+            echo "https://$CUSTOM_DOMAIN"
+          fi
