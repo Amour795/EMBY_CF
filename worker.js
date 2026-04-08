@@ -1,10 +1,10 @@
 /**
  * =================================================================================
- * Cloudflare Worker Emby 终极版 (测速记录持久化 + 深度客户端解析)
+ * Cloudflare Worker Emby 终极版 v1.0 (全站监控 + 极限流媒体透传 + 测速历史)
  * =================================================================================
  */
 
-const PANEL_PASSWORD = 'emby'; // 访问密码
+const PANEL_PASSWORD = 'emby'; // 控制台访问密码
 const SPEEDTEST_CHUNK = new Uint8Array(1024 * 1024);
 
 // =====================================
@@ -210,7 +210,7 @@ const FRONTEND_HTML = `
   <div id="speedtest-modal" class="modal" hidden>
     <div class="modal-overlay" onclick="document.getElementById('speedtest-modal').hidden=true"></div>
     <div class="modal-content">
-      <h3 style="margin:0 0 0.8rem 0">🛰️ 边缘网络诊断与历史记录</h3>
+      <h3 style="margin:0 0 0.8rem 0">🛰️ 边缘网络诊断与历史</h3>
       <div id="st-results">
         <div class="st-item"><span>地理位置:</span><span id="st-loc" style="color:var(--primary); font-weight:700">正在定位...</span></div>
         <div class="st-item"><span>运营商:</span><span id="st-isp" style="font-weight:700">--</span></div>
@@ -314,19 +314,16 @@ const FRONTEND_HTML = `
           document.getElementById('total-playback-info').textContent = d.total.playbackInfo || 0;
         }
         
-        // 渲染活跃审计
         document.getElementById('user-stats-body').innerHTML = d.userStats.map(u => 
           '<tr><td style="font-family:monospace; font-size:0.75rem; color:var(--primary);">' + formatMaskedIP(u.ip) + '</td><td style="font-size:0.8rem; word-break:break-all;">' + u.client_name + '</td><td style="font-size:0.8rem;">' + Math.round(u.duration_sec/60) + '分</td><td style="text-align:right"><button class="button" style="padding: 0.2rem 0.5rem; font-size: 0.7rem; border: 1px solid #fca5a5; color: #ef4444; background: transparent; white-space: nowrap;" onclick="banIP(\\''+u.ip+'\\')">封禁</button></td></tr>'
         ).join('');
         if(d.userStats.length === 0) document.getElementById('user-stats-body').innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--text-muted)">暂无数据记录</td></tr>';
         
-        // 渲染历史测速
         document.getElementById('st-history-body').innerHTML = d.speedLogs.map(s => 
           '<tr><td style="color:var(--text-soft)">' + formatTime(s.created_at) + '</td><td>' + s.isp + '</td><td>' + s.ping + 'ms</td><td style="text-align:right; font-weight:700; color:var(--primary)">' + s.speed_mbps + ' M</td></tr>'
         ).join('');
-        if(d.speedLogs.length === 0) document.getElementById('st-history-body').innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--text-muted)">暂无历史记录，快去测一次吧</td></tr>';
+        if(d.speedLogs.length === 0) document.getElementById('st-history-body').innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--text-muted)">暂无历史记录</td></tr>';
 
-        // 渲染图表
         const commonOpt = { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } };
         if(trendChart) trendChart.destroy();
         trendChart = new Chart(document.getElementById('trendChart'), { type: 'line', data: { labels: d.dailyStats.map(s => s.date.slice(5)).reverse(), datasets: [{ data: d.dailyStats.map(s => s.playing_count).reverse(), borderColor: '#6366f1', fill: true, tension: 0.4 }] }, options: commonOpt });
@@ -344,9 +341,7 @@ const FRONTEND_HTML = `
       const speedEl = document.getElementById('live-speed');
       btn.disabled = true; btn.textContent = '卫星定位中...'; speedEl.textContent = '0.00';
       
-      let finalLoc = '未知位置';
-      let finalIsp = '未知网络';
-      let pingVal = 0;
+      let finalLoc = '未知位置'; let finalIsp = '未知网络'; let pingVal = 0;
 
       try {
         await fetch('https://ipapi.co/json/').then(r => r.json()).then(geo => {
@@ -375,13 +370,12 @@ const FRONTEND_HTML = `
           if (duration > 0.1) speedEl.textContent = ((receivedLength * 8) / (1024 * 1024) / duration).toFixed(2);
         }
         
-        // 💡 测速完成：静默上报结果到后端
         const finalSpeed = parseFloat(speedEl.textContent);
         fetch('/api/speedlog', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-Api-Key': API_TOKEN },
           body: JSON.stringify({ loc: finalLoc, isp: finalIsp, ping: pingVal, speed_mbps: finalSpeed })
-        }).then(() => loadData()); // 刷新表格
+        }).then(() => loadData());
 
         btn.textContent = '重新测试';
       } catch(e) { alert('测速连接中断'); }
@@ -405,6 +399,9 @@ export default {
     }
     if (url.pathname === '/sw.js') return new Response("self.addEventListener('fetch',()=>{})", { headers: { 'Content-Type': 'application/javascript' } });
 
+    // =====================================
+    // 🛑 黑名单与地区拦截中间件
+    // =====================================
     const config = await syncConfig(env);
     const clientIp = request.headers.get('cf-connecting-ip') || '未知 IP';
     const countryCode = request.cf?.country || 'XX';
@@ -426,12 +423,12 @@ export default {
       if (url.pathname === '/auth/verify') return new Response(JSON.stringify({ok:true}), { status: 200 });
     }
 
+    // API 路由
     if (url.pathname === '/') return new Response(FRONTEND_HTML, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
     if (url.pathname === '/stats') return handleStatsRequest(env);
     if (url.pathname === '/trace') return new Response(JSON.stringify({ ip: clientIp, colo: colo }), { headers: { 'Cache-Control': 'no-store' } });
     if (url.pathname === '/speedtest') return new Response(new ReadableStream({ start(c) { for(let i=0; i<15; i++) c.enqueue(SPEEDTEST_CHUNK); c.close(); } }), { headers: { 'Content-Type': 'application/octet-stream' } });
     
-    // 写入测速记录 API
     if (url.pathname === '/api/speedlog' && request.method === 'POST') {
       try {
         const body = await request.json();
@@ -470,6 +467,9 @@ export default {
       } catch(e) { return new Response(JSON.stringify({ok: false, error: e.message}), {status: 500}); }
     }
 
+    // =====================================
+    // 🎬 Emby 核心反向代理与客户端解析
+    // =====================================
     let upstream;
     try {
       let p = url.pathname.slice(1).replace(/^(https?)\/(?!\/)/, '$1://');
@@ -477,12 +477,10 @@ export default {
       upstream = new URL(p); upstream.search = url.search;
     } catch { return new Response('Invalid Request', { status: 400 }); }
 
-    // 💡 核心强化：深度分析 User-Agent 告别 Device 和 Web Browser
     let rawClientName = request.headers.get('X-Emby-Client') || '';
     const userAgent = request.headers.get('User-Agent') || '';
     let clientName = rawClientName;
 
-    // 如果 Emby 原生上报为空，或者是毫无意义的泛称，我们直接接管解析权
     if (!clientName || clientName === 'Web Browser' || clientName === 'Device' || clientName === '未知设备') {
       if (userAgent.includes('VidHub')) clientName = 'VidHub 客户端';
       else if (userAgent.includes('Popcorn') || userAgent.includes('爆米花')) clientName = '网易爆米花';
@@ -507,18 +505,24 @@ export default {
     const options = { method: request.method, headers: new Headers(request.headers) };
     options.headers.set('Host', upstream.host);
     
-    // 💡 首屏加速优化：静态资源强缓，流媒体直接透传
+    // =====================================
+    // 🚀 终极首屏加速与透传优化
+    // =====================================
     if (/\.(jpeg|jpg|png|gif|css|js|woff2|woff|ttf)$/i.test(upstream.pathname)) {
       options.cf = { cacheTtl: 7200, cacheEverything: true };
-    } else if (/\.(mp4|mkv|ts|webm|m3u8)$/i.test(upstream.pathname) || upstream.pathname.includes('/stream')) {
-      options.cf = { cacheTtl: 0, cacheEverything: false }; // 拒绝边缘缓冲，直连降延迟
-      options.headers.set('Connection', 'keep-alive');
+    } else if (/\.(mp4|mkv|ts|webm|m3u8|flv|aac|mp3)$/i.test(upstream.pathname) || upstream.pathname.includes('/stream') || upstream.pathname.includes('/PlaybackInfo')) {
+      options.cf = { cacheTtl: 0, cacheEverything: false }; // 拒绝边缘缓冲，降低 TTFB
+      options.headers.set('Connection', 'keep-alive');      // 复用 TCP
+      options.headers.delete('Accept-Encoding');          // 💡 杀招：干掉 GZIP 压缩头，强迫源站返回原始二进制分片！
     }
 
     return fetch(upstream.toString(), options);
   }
 };
 
+// =====================================
+// 🗄️ 数据库操作层
+// =====================================
 async function recordBasicStats(env, type, client) {
   if (!env.DB) return;
   try {
@@ -546,7 +550,6 @@ async function handleStatsRequest(env) {
       env.DB.prepare("SELECT ip, client_name, SUM(duration_sec) as duration_sec FROM auto_emby_user_stats GROUP BY ip, client_name ORDER BY duration_sec DESC LIMIT 10"),
       env.DB.prepare("SELECT client_name, SUM(count) as total_count FROM auto_emby_client_stats GROUP BY client_name ORDER BY total_count DESC LIMIT 8"),
       env.DB.prepare("SELECT COALESCE(SUM(playing_count),0) as playing, COALESCE(SUM(playback_info_count),0) as playbackInfo FROM auto_emby_daily_stats"),
-      // 💡 新增：拉取最近 5 次测速记录
       env.DB.prepare("SELECT created_at, loc, isp, ping, speed_mbps FROM auto_emby_speed_log ORDER BY id DESC LIMIT 5")
     ]);
     return new Response(JSON.stringify({ 
@@ -556,7 +559,7 @@ async function handleStatsRequest(env) {
         userStats: batch[1].results, 
         clientStats: batch[2].results, 
         total: batch[3].results[0],
-        speedLogs: batch[4].results ? batch[4].results : [] // 防止未建表报错
+        speedLogs: batch[4].results ? batch[4].results : []
       } 
     }));
   } catch (e) {
