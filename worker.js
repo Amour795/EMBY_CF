@@ -1,11 +1,14 @@
 /**
  * =================================================================================
- * Cloudflare Worker Emby 终极版 (精准客户端识别 + 运营商汉化 + 实时测速)
+ * Cloudflare Worker Emby 终极版 (白名单自适应 + 客户端全识别 + 极致间距)
  * =================================================================================
  */
 
-const PANEL_PASSWORD = 'emby'; // 访问密码
-const ALLOWED_COUNTRIES = [];
+const PANEL_PASSWORD = 'emby'; 
+
+// 🛡️ 核心防御：为空数组 [] 则不拦截任何人；填入 ['CN'] 则只允许大陆访问
+const ALLOWED_COUNTRIES = []; 
+
 const SPEEDTEST_CHUNK = new Uint8Array(1024 * 1024);
 
 const FRONTEND_HTML = `
@@ -142,7 +145,7 @@ const FRONTEND_HTML = `
       });
       if(deviceChart) deviceChart.destroy();
       deviceChart = new Chart(document.getElementById('deviceChart'), {
-        type: 'doughnut', data: { labels: d.clientStats.map(c => c.client_name), datasets: [{ data: d.clientStats.map(c => c.total_count), backgroundColor: ['#6366f1', '#10b981', '#f59e0b', '#ec4899', '#a855f7'] }] }, options: { ...commonOpt, plugins: { legend: { display: true, position: 'right', labels: { boxWidth: 10, font: { size: 10 } } } } }
+        type: 'doughnut', data: { labels: d.clientStats.map(c => c.client_name), datasets: [{ data: d.clientStats.map(c => c.total_count), backgroundColor: ['#6366f1', '#10b981', '#f59e0b', '#ec4899', '#a855f7', '#0ea5e9'] }] }, options: { ...commonOpt, plugins: { legend: { display: true, position: 'right', labels: { boxWidth: 10, font: { size: 10 } } } } }
       });
     }
 
@@ -154,14 +157,13 @@ const FRONTEND_HTML = `
       btn.disabled = true; btn.textContent = '卫星定位中...';
       
       try {
-        // 定位并汉化运营商
         fetch('https://ipapi.co/json/').then(r => r.json()).then(geo => {
           document.getElementById('st-loc').textContent = geo.region + ' ' + geo.city;
           let rawIsp = geo.org || '';
           let finalIsp = '未知运营商';
           for (let key in ispMap) { if(rawIsp.toUpperCase().includes(key.toUpperCase())) { finalIsp = ispMap[key]; break; } }
           document.getElementById('st-isp').textContent = finalIsp;
-        }).catch(() => { document.getElementById('st-loc').textContent = '定位限制'; });
+        }).catch(() => { document.getElementById('st-loc').textContent = '定位受限'; });
 
         const pStart = performance.now();
         await fetch('/trace', { method: 'HEAD', headers: {'X-Api-Key': API_TOKEN}, cache: 'no-store' });
@@ -193,7 +195,6 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    // 资源路由
     if (url.pathname === '/icon.png') {
       const icon = await fetch('https://raw.githubusercontent.com/google/material-design-icons/master/png/device/wallpaper/materialicons/48dp/1x/baseline_wallpaper_black_48dp.png');
       return new Response(icon.body, { headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=604800' } });
@@ -207,10 +208,11 @@ export default {
     }
     if (url.pathname === '/sw.js') return new Response("self.addEventListener('fetch',()=>{})", { headers: { 'Content-Type': 'application/javascript' } });
 
-    // 地区拦截
-    if (request.cf?.country && !ALLOWED_COUNTRIES.includes(request.cf.country)) return new Response('Blocked', { status: 403 });
+    // 💡 修复：判断 ALLOWED_COUNTRIES 是否为空，有配置才启用拦截
+    if (ALLOWED_COUNTRIES.length > 0 && request.cf?.country && !ALLOWED_COUNTRIES.includes(request.cf.country)) {
+      return new Response('Blocked', { status: 403 });
+    }
 
-    // 鉴权
     const authKey = request.headers.get('X-Api-Key');
     const isApi = ['/stats', '/trace', '/speedtest', '/auth/verify'].includes(url.pathname);
     if (isApi) {
@@ -225,7 +227,6 @@ export default {
       return new Response(new ReadableStream({ start(c) { for(let i=0; i<15; i++) c.enqueue(SPEEDTEST_CHUNK); c.close(); } }), { headers: { 'Content-Type': 'application/octet-stream' } });
     }
 
-    // --- 核心反代 & 客户端精准识别 ---
     let upstream;
     try {
       let p = url.pathname.slice(1).replace(/^(https?)\/(?!\/)/, '$1://');
@@ -233,7 +234,6 @@ export default {
       upstream = new URL(p); upstream.search = url.search;
     } catch { return new Response('Invalid URL', { status: 400 }); }
 
-    // 🚀 增强识别逻辑
     const embyClient = request.headers.get('X-Emby-Client') || '';
     const userAgent = request.headers.get('User-Agent') || '';
     let clientName = embyClient || '未知设备';
