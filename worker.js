@@ -1,14 +1,11 @@
 /**
  * =================================================================================
- * Cloudflare Worker Emby 终极版 (修复统计数据白屏 Bug + 客户端全识别)
+ * Cloudflare Worker Emby 终极版 (数据库容错防崩溃 + 客户端全识别)
  * =================================================================================
  */
 
 const PANEL_PASSWORD = 'emby'; 
-
-// 🛡️ 核心防御：为空数组 [] 则不拦截任何人；填入 ['CN'] 则只允许大陆访问
 const ALLOWED_COUNTRIES = []; 
-
 const SPEEDTEST_CHUNK = new Uint8Array(1024 * 1024);
 
 const FRONTEND_HTML = `
@@ -54,8 +51,8 @@ const FRONTEND_HTML = `
     .modal-content { position: relative; width: 100%; max-width: 400px; background: var(--modal-bg); border-radius: 16px; padding: 1rem; }
     .st-item { display: flex; justify-content: space-between; border-bottom: 1px solid var(--border); padding: 0.4rem 0; font-size: 0.85rem;}
     .speed-number { font-size: 2.2rem; font-weight: 800; color: var(--primary); display: block; text-align: center; margin: 0.5rem 0; font-family: monospace; }
-    .stat-val { font-size: 1.5rem; font-weight: 800; color: var(--primary); }
-    .stat-label { font-size: 0.75rem; color: var(--text-soft); }
+    .stat-val { font-size: 1.6rem; font-weight: 800; color: var(--primary); }
+    .stat-label { font-size: 0.75rem; color: var(--text-soft); margin-top: 0.2rem;}
   </style>
 </head>
 <body>
@@ -78,6 +75,10 @@ const FRONTEND_HTML = `
         <button id="btn-open-speedtest" class="button button--primary">⚡️ 实时测速</button>
         <button id="stats-refresh" class="button button--secondary">🔄 刷新数据</button>
       </div>
+    </div>
+
+    <div id="db-warning" style="display:none; background: #fee2e2; color: #ef4444; padding: 0.8rem; border-radius: 10px; font-size: 0.85rem; margin-bottom: 0.8rem; border: 1px solid #fca5a5;">
+      ⚠️ 数据库连接异常或缺少表结构，部分数据可能无法显示。
     </div>
 
     <div style="display:grid; grid-template-columns: 1fr 1fr; gap:0.8rem; margin-bottom:0.8rem">
@@ -128,47 +129,57 @@ const FRONTEND_HTML = `
     let API_TOKEN = localStorage.getItem('emby-token') || '';
     const checkAuth = async (token) => {
       if(!token) return;
-      const res = await fetch('/auth/verify', { headers: {'X-Api-Key': token} });
-      if (res.ok) {
-        API_TOKEN = token; localStorage.setItem('emby-token', token);
-        document.getElementById('auth-screen').style.display = 'none';
-        document.getElementById('main-content').style.display = 'block';
-        loadData();
-      }
+      try {
+        const res = await fetch('/auth/verify', { headers: {'X-Api-Key': token} });
+        if (res.ok) {
+          API_TOKEN = token; localStorage.setItem('emby-token', token);
+          document.getElementById('auth-screen').style.display = 'none';
+          document.getElementById('main-content').style.display = 'block';
+          loadData();
+        } else {
+          alert('密码错误');
+        }
+      } catch(e) {}
     };
     document.getElementById('auth-btn').onclick = () => checkAuth(document.getElementById('auth-input').value);
     if(API_TOKEN) checkAuth(API_TOKEN);
 
-    const ispMap = {
-      'China Mobile': '中国移动', 'China Unicom': '中国联通', 'China Telecom': '中国电信',
-      'CMCC': '中国移动', 'UNICOM': '中国联通', 'CHINANET': '中国电信'
-    };
+    const ispMap = { 'China Mobile': '中国移动', 'China Unicom': '中国联通', 'China Telecom': '中国电信', 'CMCC': '中国移动', 'UNICOM': '中国联通', 'CHINANET': '中国电信' };
 
     async function loadData() {
       try {
         const res = await fetch('/stats', { headers: {'X-Api-Key': API_TOKEN} });
         const payload = await res.json();
-        const d = payload.data;
         
-        // 修复：确保 total 存在才渲染，避免 JS 报错阻断整个页面
-        if (d.total) {
-          document.getElementById('total-playing').textContent = d.total.playing || 0;
-          document.getElementById('total-playback-info').textContent = d.total.playbackInfo || 0;
+        // 容错处理：如果后端报了错（比如缺表），显示提示横幅
+        if (!payload.ok) {
+          document.getElementById('db-warning').style.display = 'block';
+          document.getElementById('db-warning').innerText = '⚠️ 数据库异常: ' + (payload.error || '未知错误');
+        } else {
+          document.getElementById('db-warning').style.display = 'none';
         }
 
+        const d = payload.data || { dailyStats: [], userStats: [], clientStats: [], total: {playing: 0, playbackInfo: 0} };
+        
+        document.getElementById('total-playing').textContent = d.total.playing || 0;
+        document.getElementById('total-playback-info').textContent = d.total.playbackInfo || 0;
+
         document.getElementById('user-stats-body').innerHTML = d.userStats.map(u => '<tr><td>' + u.ip.split('.').slice(0,2).join('.') + '.*</td><td>' + u.client_name + '</td><td>' + Math.round(u.duration_sec/60) + '分</td></tr>').join('');
+        if(d.userStats.length === 0) document.getElementById('user-stats-body').innerHTML = '<tr><td colspan="3" style="text-align:center;color:var(--text-muted)">暂无数据</td></tr>';
         
         const commonOpt = { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } };
+        
         if(trendChart) trendChart.destroy();
         trendChart = new Chart(document.getElementById('trendChart'), {
           type: 'line', data: { labels: d.dailyStats.map(s => s.date.slice(5)).reverse(), datasets: [{ data: d.dailyStats.map(s => s.playing_count).reverse(), borderColor: '#6366f1', fill: true, tension: 0.4 }] }, options: commonOpt
         });
+        
         if(deviceChart) deviceChart.destroy();
         deviceChart = new Chart(document.getElementById('deviceChart'), {
           type: 'doughnut', data: { labels: d.clientStats.map(c => c.client_name), datasets: [{ data: d.clientStats.map(c => c.total_count), backgroundColor: ['#6366f1', '#10b981', '#f59e0b', '#ec4899', '#a855f7', '#0ea5e9'] }] }, options: { ...commonOpt, plugins: { legend: { display: true, position: 'right', labels: { boxWidth: 10, font: { size: 10 } } } } }
         });
       } catch (e) {
-        console.error("加载数据失败:", e);
+        console.error("渲染失败:", e);
       }
     }
 
@@ -231,7 +242,6 @@ export default {
     }
     if (url.pathname === '/sw.js') return new Response("self.addEventListener('fetch',()=>{})", { headers: { 'Content-Type': 'application/javascript' } });
 
-    // 白名单拦截逻辑修复：只有当 ALLOWED_COUNTRIES 不为空时才拦截
     if (ALLOWED_COUNTRIES.length > 0 && request.cf?.country && !ALLOWED_COUNTRIES.includes(request.cf.country)) {
       return new Response('Blocked', { status: 403 });
     }
@@ -286,35 +296,50 @@ export default {
 
 async function recordBasicStats(env, type, client) {
   if (!env.DB) return;
-  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' });
-  const col = type === 'playing' ? 'playing_count' : 'playback_info_count';
-  const sql = "INSERT INTO auto_emby_daily_stats (date, " + col + ") VALUES (?, 1) ON CONFLICT(date) DO UPDATE SET " + col + " = " + col + " + 1";
-  await env.DB.prepare(sql).bind(today).run();
-  await env.DB.prepare("INSERT INTO auto_emby_client_stats (date, client_name, count) VALUES (?, ?, 1) ON CONFLICT(date, client_name) DO UPDATE SET count = count + 1").bind(today, client).run();
+  try {
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' });
+    const col = type === 'playing' ? 'playing_count' : 'playback_info_count';
+    const sql = "INSERT INTO auto_emby_daily_stats (date, " + col + ") VALUES (?, 1) ON CONFLICT(date) DO UPDATE SET " + col + " = " + col + " + 1";
+    await env.DB.prepare(sql).bind(today).run();
+    await env.DB.prepare("INSERT INTO auto_emby_client_stats (date, client_name, count) VALUES (?, ?, 1) ON CONFLICT(date, client_name) DO UPDATE SET count = count + 1").bind(today, client).run();
+  } catch (e) {
+    console.error('Basic Stats Write Error:', e);
+  }
 }
 
 async function recordUserAudit(env, ip, client, sec) {
   if (!env.DB) return;
-  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' });
-  await env.DB.prepare("INSERT INTO auto_emby_user_stats (date, ip, client_name, duration_sec) VALUES (?, ?, ?, ?) ON CONFLICT(date, ip, client_name) DO UPDATE SET duration_sec = duration_sec + ?").bind(today, ip, client, sec, sec).run();
+  try {
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' });
+    await env.DB.prepare("INSERT INTO auto_emby_user_stats (date, ip, client_name, duration_sec) VALUES (?, ?, ?, ?) ON CONFLICT(date, ip, client_name) DO UPDATE SET duration_sec = duration_sec + ?").bind(today, ip, client, sec, sec).run();
+  } catch (e) {
+    console.error('User Audit Write Error:', e);
+  }
 }
 
 async function handleStatsRequest(env) {
-  if (!env.DB) return new Response(JSON.stringify({enabled:false}));
-  const batch = await env.DB.batch([
-    env.DB.prepare("SELECT date, playing_count FROM auto_emby_daily_stats ORDER BY date DESC LIMIT 10"),
-    env.DB.prepare("SELECT ip, client_name, SUM(duration_sec) as duration_sec FROM auto_emby_user_stats GROUP BY ip, client_name ORDER BY duration_sec DESC LIMIT 10"),
-    env.DB.prepare("SELECT client_name, SUM(count) as total_count FROM auto_emby_client_stats GROUP BY client_name ORDER BY total_count DESC LIMIT 5"),
-    // 💡 修复：确保把包含总和数据的查询重新加回 batch 数组
-    env.DB.prepare("SELECT COALESCE(SUM(playing_count),0) as playing, COALESCE(SUM(playback_info_count),0) as playbackInfo FROM auto_emby_daily_stats")
-  ]);
-  return new Response(JSON.stringify({
-    ok: true, enabled: true,
-    data: { 
-      dailyStats: batch[0].results, 
-      userStats: batch[1].results, 
-      clientStats: batch[2].results,
-      total: batch[3].results[0] // 💡 修复：将总和数据一并传回前端
-    }
-  }));
+  if (!env.DB) return new Response(JSON.stringify({ok: false, enabled:false, error: "Database not bound"}));
+  try {
+    const batch = await env.DB.batch([
+      env.DB.prepare("SELECT date, playing_count FROM auto_emby_daily_stats ORDER BY date DESC LIMIT 10"),
+      env.DB.prepare("SELECT ip, client_name, SUM(duration_sec) as duration_sec FROM auto_emby_user_stats GROUP BY ip, client_name ORDER BY duration_sec DESC LIMIT 10"),
+      env.DB.prepare("SELECT client_name, SUM(count) as total_count FROM auto_emby_client_stats GROUP BY client_name ORDER BY total_count DESC LIMIT 5"),
+      env.DB.prepare("SELECT COALESCE(SUM(playing_count),0) as playing, COALESCE(SUM(playback_info_count),0) as playbackInfo FROM auto_emby_daily_stats")
+    ]);
+    return new Response(JSON.stringify({
+      ok: true, enabled: true,
+      data: { 
+        dailyStats: batch[0].results, 
+        userStats: batch[1].results, 
+        clientStats: batch[2].results,
+        total: batch[3].results[0] 
+      }
+    }));
+  } catch (e) {
+    // 💡 核心防御：即使 SQL 报错（缺表），也会返回空数组结构，而不是让前端直接崩溃
+    return new Response(JSON.stringify({
+      ok: false, enabled: true, error: e.message,
+      data: { dailyStats: [], userStats: [], clientStats: [], total: {playing: 0, playbackInfo: 0} }
+    }));
+  }
 }
