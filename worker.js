@@ -1,614 +1,290 @@
 /**
  * =================================================================================
- *              Cloudflare Worker 通用 Emby 反向代理脚本 (带 D1 统计版)
+ * Cloudflare Worker Emby 终极版 (精准客户端识别 + 运营商汉化 + 实时测速)
  * =================================================================================
- *
- * 版本: 2.5
- * 更新日志:
- * - 集成 D1 数据库统计功能
- * - 统计播放次数与获取链接次数
- * - 统计日期强制使用北京时间 (UTC+8)
- * - 集成前端页面
- *
  */
 
-const MANUAL_REDIRECT_DOMAINS = [
-  // Emby线路
-  'emby.bangumi.ca',
+const PANEL_PASSWORD = 'emby'; // 访问密码
+const ALLOWED_COUNTRIES = ['CN'];
+const SPEEDTEST_CHUNK = new Uint8Array(1024 * 1024);
 
-  // 阿里云盘
-  'aliyundrive.com',
-  'aliyundrive.net',
-  'aliyuncs.com',
-  'alicdn.com',
-  'aliyun.com',
-  'cdn.aliyundrive.com',
-
-  // 迅雷
-  'xunlei.com',
-  'xlusercdn.com',
-  'xycdn.com',
-  'sandai.net',
-  'thundercdn.com',
-
-  // 115
-  '115.com',
-  '115cdn.com',
-  '115cdn.net',
-  'anxia.com',
-
-  // 天翼
-  '189.cn',
-  'mini189.cn',
-  'ctyunxs.cn',
-  'cloud.189.cn',
-  'tianyiyun.com',
-  'telecomjs.com',
-
-  // 夸克 / UC
-  'quark.cn',
-  'quarkdrive.cn',
-  'uc.cn',
-  'ucdrive.cn',
-
-  // 小雅
-  'xiaoya.pro',
-
-  // 通用 CDN（强烈建议）
-  'myqcloud.com',
-  'cloudfront.net',
-  'akamaized.net',
-  'fastly.net',
-  'hwcdn.net',
-  'bytecdn.cn',
-  'bdcdn.net'
-];
-
-
-// 被封锁的EMBY，走美西
-const DOMAIN_PROXY_RULES = {
-  // 格式：'域名后缀': '反代服务器地址'
-  'biliblili.uk': 'example.com',
-};
-
-const JP_COLOS = ['NRT', 'KIX', 'FUK', 'OKA'];
-
-// 前端页面HTML
 const FRONTEND_HTML = `
 <!DOCTYPE html>
-<html>
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Emby 反代工具指南 | 声明</title>
-  <link rel="icon" href="/favicon.ico" type="image/webp">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <title>Emby 运维中心</title>
+  <link rel="manifest" href="/manifest.json">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <link rel="icon" type="image/png" href="/icon.png">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <style>
-    * { box-sizing: border-box; }
-    body { font-family: -apple-system, system-ui, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; line-height: 1.6; color: #e1e4e8; margin: 0; padding: 0; background-color: #1a1c22; display: flex; min-height: 100vh; }
-    
-    /* 整体容器 */
-    .container { 
-      width: 100%; 
-      max-width: 800px; 
-      margin: auto; 
-      padding: 20px; 
-      display: flex; 
-      flex-direction: column; 
-      gap: 20px; 
+    :root {
+      --bg-color: #f8fafc; --panel-bg: rgba(255, 255, 255, 0.85); --modal-bg: #ffffff;
+      --text-main: #0f172a; --text-soft: #475569; --text-muted: #94a3b8;
+      --border: rgba(226, 232, 240, 0.8); --primary: #6366f1;
+      --gradient-brand: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);
+      --shadow-lg: 0 20px 40px -15px rgba(99, 102, 241, 0.15);
     }
-    
-    /* 内容区域 */
-    .content-section { 
-      background: #252830; 
-      padding: 40px; 
-      border-radius: 16px; 
-      box-shadow: 0 4px 12px rgba(0,0,0,0.1); 
-      border-top: 5px solid #0070f3; 
+    html.dark {
+      --bg-color: #0f172a; --panel-bg: rgba(30, 41, 59, 0.75); --modal-bg: #1e293b;
+      --text-main: #f8fafc; --text-soft: #cbd5e1; --text-muted: #64748b;
+      --border: rgba(51, 65, 85, 0.8); --primary: #818cf8;
     }
-    .content-section h1 { margin-top: 0; color: #0070f3; display: flex; align-items: center; }
-    h2 { color: #0070f3; border-bottom: 2px solid #3e4451; padding-bottom: 10px; margin-top: 30px; }
-    code { background: rgba(0, 112, 243, 0.1); padding: 4px 8px; border-radius: 4px; font-family: 'Fira Code', monospace; font-size: 0.9em; color: #61afef; word-break: break-all; border: 1px solid rgba(0, 112, 243, 0.2); }
-    .example-box { background: rgba(0, 112, 243, 0.05); border-left: 4px solid #0070f3; padding: 15px; margin: 15px 0; border-radius: 0 8px 8px 0; }
-    .warning { color: #e06c75; font-weight: bold; border: 2px solid rgba(224, 108, 117, 0.3); padding: 20px; border-radius: 12px; margin-top: 40px; background: rgba(224, 108, 117, 0.05); }
-    .strong-red { color: #e06c75; font-weight: 900; text-decoration: underline; font-size: 1.1em; }
-
-    .status-tag { display: inline-block; background: #0070f3; color: white; padding: 2px 10px; border-radius: 4px; font-weight: bold; margin-bottom: 10px; }
-    .feature-card { background: rgba(0, 112, 243, 0.1); border-radius: 8px; padding: 20px; margin: 20px 0; border-left: 4px solid #0070f3; }
-    .feature-card h3 { color: #0070f3; margin-top: 0; font-size: 1.2em; }
-    .feature-card p { margin-bottom: 0; color: #abb2bf; }
-
-    .footer-text { margin-top: 30px; padding-top: 20px; border-top: 1px dashed #3e4451; font-size: 0.9em; }
-
-    /* 统计卡片样式 */
-    .stat-card {
-      background: rgba(0, 112, 243, 0.1);
-      padding: 20px;
-      border-radius: 8px;
-      text-align: center;
-      flex: 1;
-      margin: 0 10px;
-      border: 1px solid rgba(0, 112, 243, 0.2);
-    }
-    .stat-card:first-child {
-      margin-left: 0;
-    }
-    .stat-card:last-child {
-      margin-right: 0;
-    }
-    .stat-value {
-      font-size: 2em;
-      font-weight: bold;
-      color: #0070f3;
-      margin-top: 10px;
-    }
-
-    /* 每日统计表格 */
-    #daily-stats {
-      background: rgba(0, 0, 0, 0.2);
-      border-radius: 8px;
-      padding: 15px;
-      overflow-x: auto;
-    }
-    .stats-table {
-      width: 100%;
-      border-collapse: collapse;
-    }
-    .stats-table th,
-    .stats-table td {
-      padding: 10px;
-      text-align: left;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-    }
-    .stats-table th {
-      background: rgba(0, 112, 243, 0.2);
-      font-weight: bold;
-      color: #0070f3;
-    }
-    .stats-table tr:hover {
-      background: rgba(0, 112, 243, 0.1);
-    }
-
-    @media (max-width: 900px) {
-      .container { padding: 10px; }
-      .content-section { padding: 20px; }
-      .stat-card {
-        margin: 5px;
-        padding: 15px;
-      }
-    }
+    * { box-sizing: border-box; transition: background-color 0.2s; }
+    body { margin: 0; font-family: -apple-system, sans-serif; background-color: var(--bg-color); color: var(--text-main); min-height: 100vh; overflow-x: hidden; }
+    .page { padding: 1rem; width: min(100%, 1200px); margin: 0 auto; }
+    .panel { background: var(--panel-bg); border: 1px solid var(--border); border-radius: 16px; box-shadow: var(--shadow-lg); backdrop-filter: blur(10px); padding: 0.8rem; margin-bottom: 0.8rem; }
+    .hero__title { font-size: 1.4rem; margin: 0; font-weight: 800; display: flex; align-items: center; justify-content: space-between; }
+    .button { appearance: none; display: inline-flex; align-items: center; justify-content: center; gap: 0.4rem; border: none; border-radius: 999px; padding: 0.5rem 1rem; font-weight: 600; cursor: pointer; font-size: 0.85rem; }
+    .button--primary { background: var(--gradient-brand); color: white; }
+    .button--secondary { background: transparent; color: var(--text-main); border: 1px solid var(--border); }
+    .chart-container { position: relative; height: 160px; width: 100%; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+    th, td { padding: 0.5rem; border-bottom: 1px solid var(--border); text-align: left; }
+    #auth-screen { position: fixed; inset: 0; z-index: 9999; background: var(--bg-color); display: flex; align-items: center; justify-content: center; padding: 1rem;}
+    .input-field { width: 100%; padding: 0.8rem; border-radius: 10px; border: 2px solid var(--border); background: var(--modal-bg); color: var(--text-main); margin-bottom: 1rem; outline: none;}
+    .modal { position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center; padding: 1rem; }
+    .modal[hidden] { display: none !important; }
+    .modal-overlay { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(8px); }
+    .modal-content { position: relative; width: 100%; max-width: 400px; background: var(--modal-bg); border-radius: 16px; padding: 1rem; }
+    .st-item { display: flex; justify-content: space-between; border-bottom: 1px solid var(--border); padding: 0.4rem 0; font-size: 0.85rem;}
+    .speed-number { font-size: 2.2rem; font-weight: 800; color: var(--primary); display: block; text-align: center; margin: 0.5rem 0; font-family: monospace; }
   </style>
 </head>
 <body>
-  <div class="container">
-    
-    <div class="content-section">
-      <h1>🚀 使用指南</h1>
-      
-      <h2>通用格式</h2>
-      <div class="example-box">
-        <code>https://你的worker域名/你的域名:端口</code><br>
-        <code style="display:inline-block; margin-top:8px;">https://你的worker域名/http://你的域名:端口</code><br>
-        <code style="display:inline-block; margin-top:8px;">https://你的worker域名/https://你的域名:端口</code>
-      </div>
 
-      <h2>HTTP 示例</h2>
-      <div class="example-box">
-        <code>https://你的worker域名/http://emby.com</code>
-      </div>
-
-      <h2>HTTPS 示例</h2>
-      <div class="example-box">
-        <code>https://你的worker域名/https://emby.com</code>
-      </div>
-
-      <div class="warning">
-        ⚠️ <strong>严正警告：</strong><br>
-        添加服后 <span class="strong-red">务必手动测试</span> 是否可用。禁止未经测试大批量添加，导致服务器报错刷屏、恶意占用资源者，<span class="strong-red">直接封禁 IP，不予通知！</span>
-      </div>
+  <div id="auth-screen">
+    <div class="panel" style="width: 100%; max-width: 320px; text-align: center;">
+      <h3 style="margin-top:0">🔑 身份验证</h3>
+      <input type="password" id="auth-input" class="input-field" placeholder="密码">
+      <button id="auth-btn" class="button button--primary" style="width: 100%;">进入控制台</button>
     </div>
-
-    <div class="content-section">
-      <div class="status-tag">关于本服务</div>
-      <h1>🔧 Emby 反向代理</h1>
-      <p><strong>服务特点：</strong></p>
-      <ul style="list-style-type: disc; padding-left: 20px; color: #abb2bf;">
-        <li>高速稳定的反向代理服务</li>
-        <li>支持 WebSocket 连接</li>
-        <li>智能重定向处理</li>
-        <li>详细的使用统计</li>
-        <li>全球节点覆盖</li>
-      </ul>
-      
-      <div class="feature-card">
-        <h3>📊 统计功能</h3>
-        <p>本服务集成了 D1 数据库统计功能，可以记录播放次数和获取链接次数，帮助您了解服务使用情况。</p>
-      </div>
-      
-      <div class="feature-card">
-        <h3>🌍 全球节点</h3>
-        <p>利用 Cloudflare 全球 CDN 网络，为您提供就近的访问节点，确保最佳的访问速度。</p>
-      </div>
-      
-      <div class="content-section" id="stats-section">
-        <h2>📈 使用统计</h2>
-        <div id="stats-loading">加载统计数据中...</div>
-        <div id="stats-error" style="display: none; color: #e06c75;"></div>
-        <div id="stats-content" style="display: none;">
-          <div style="display: flex; justify-content: space-between; margin-bottom: 20px;">
-            <div class="stat-card">
-              <h3>总播放次数</h3>
-              <div id="total-playing" class="stat-value">0</div>
-            </div>
-            <div class="stat-card">
-              <h3>总获取链接次数</h3>
-              <div id="total-playback-info" class="stat-value">0</div>
-            </div>
-          </div>
-          <div style="margin-bottom: 20px; color: #666; font-size: 14px;">
-            <p>备注：以上统计数据为最近30天的累计数据</p>
-          </div>
-          <h3>每日统计</h3>
-          <div style="margin-bottom: 10px; color: #666; font-size: 14px;">
-            <p>备注：每日统计显示最近10天的数据</p>
-          </div>
-          <div id="daily-stats"></div>
-          <div class="footer-text" style="margin-top: 20px;">
-            <p>数据更新时间: <span id="last-updated">--</span></p>
-            <p>每小时自动更新</p>
-          </div>
-        </div>
-      </div>
-      
-      <div class="footer-text">
-        <p>© 2026 Emby 反向代理服务</p>
-        <p>本服务仅用于学习和研究目的</p>
-        <p>交流反馈群组: <a href="https://t.me/Dirige_Proxy" target="_blank" style="color: #0070f3; text-decoration: none;">https://t.me/Dirige_Proxy</a></p>
-      </div>
-    </div>
-
   </div>
+
+  <main class="page" id="main-content" style="display: none;">
+    <div class="panel">
+      <div class="hero__title">
+        <span>🚀 Emby 数据大屏</span>
+        <button id="theme-toggle" class="button button--secondary" style="padding:0.4rem">🌓</button>
+      </div>
+      <div style="display: flex; gap: 0.5rem; margin-top: 0.8rem;">
+        <button id="btn-open-speedtest" class="button button--primary">⚡️ 实时测速</button>
+        <button id="stats-refresh" class="button button--secondary">🔄 刷新数据</button>
+      </div>
+    </div>
+
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 0.8rem;">
+      <div class="panel"><div style="font-weight:700; font-size:0.9rem">📈 观影趋势</div><div class="chart-container"><canvas id="trendChart"></canvas></div></div>
+      <div class="panel"><div style="font-weight:700; font-size:0.9rem">📱 客户端分布</div><div class="chart-container"><canvas id="deviceChart"></canvas></div></div>
+    </div>
+
+    <div class="panel">
+      <div style="font-weight:700; font-size:0.9rem; margin-bottom:0.5rem">👥 活跃审计 (近10日)</div>
+      <table><thead><tr><th>IP地址</th><th>客户端</th><th>时长</th></tr></thead><tbody id="user-stats-body"></tbody></table>
+    </div>
+  </main>
+
+  <div id="speedtest-modal" class="modal" hidden>
+    <div class="modal-overlay" onclick="document.getElementById('speedtest-modal').hidden=true"></div>
+    <div class="modal-content">
+      <h3 style="margin:0 0 0.8rem 0">🛰️ 网络诊断</h3>
+      <div id="st-results">
+        <div class="st-item"><span>地理位置:</span><span id="st-loc" style="color:var(--primary); font-weight:700">正在定位...</span></div>
+        <div class="st-item"><span>运营商:</span><span id="st-isp" style="font-weight:700">--</span></div>
+        <div class="st-item"><span>延迟:</span><span id="st-ping">--</span></div>
+      </div>
+      <div class="speed-number"><span id="live-speed">0.00</span><small style="font-size:1rem; margin-left:4px">Mbps</small></div>
+      <button id="st-start-btn" class="button button--primary" style="width: 100%; margin-top: 0.5rem; padding:0.8rem">开始测试</button>
+      <button onclick="document.getElementById('speedtest-modal').hidden=true" class="button button--secondary" style="width: 100%; margin-top: 0.5rem;">关闭</button>
+    </div>
+  </div>
+
   <script>
-    // Cloudflare Insights script removed to avoid errors
-    
-    // 统计数据相关函数
-    async function fetchStats() {
-      try {
-        const response = await fetch('/stats');
-        const data = await response.json();
-        
-        if (data.error) {
-          document.getElementById('stats-loading').style.display = 'none';
-          document.getElementById('stats-error').style.display = 'block';
-          document.getElementById('stats-content').style.display = 'none';
-          document.getElementById('stats-error').textContent = data.error;
-          return;
-        }
-        
-        // 更新统计数据
-        document.getElementById('total-playing').textContent = data.data.total.playing;
-        document.getElementById('total-playback-info').textContent = data.data.total.playbackInfo;
-        document.getElementById('last-updated').textContent = data.data.lastUpdated;
-        
-        // 更新每日统计表格
-        const dailyStatsContainer = document.getElementById('daily-stats');
-        if (data.data.dailyStats.length > 0) {
-          var tableHTML = '<table class="stats-table"><thead><tr><th>日期</th><th>播放次数</th><th>获取链接次数</th></tr></thead><tbody>';
-          
-          // 只显示最近10天的数据
-          const recentStats = data.data.dailyStats.slice(0, 10);
-          recentStats.forEach(function(stat) {
-            tableHTML += '<tr><td>' + stat.date + '</td><td>' + stat.playing_count + '</td><td>' + stat.playback_info_count + '</td></tr>';
-          });
-          
-          tableHTML += '</tbody></table>';
-          
-          dailyStatsContainer.innerHTML = tableHTML;
-        } else {
-          dailyStatsContainer.innerHTML = '<p>暂无统计数据</p>';
-        }
-        
-        // 显示统计内容
-        document.getElementById('stats-loading').style.display = 'none';
-        document.getElementById('stats-error').style.display = 'none';
-        document.getElementById('stats-content').style.display = 'block';
-        
-      } catch (error) {
-        console.error('获取统计数据失败:', error);
-        document.getElementById('stats-loading').style.display = 'none';
-        document.getElementById('stats-error').style.display = 'block';
-        document.getElementById('stats-content').style.display = 'none';
-        document.getElementById('stats-error').textContent = '获取统计数据失败，请稍后再试';
+    if ('serviceWorker' in navigator) { window.addEventListener('load', () => { navigator.serviceWorker.register('/sw.js').catch(()=>{}); }); }
+
+    let trendChart, deviceChart;
+    const setDark = (d) => { document.documentElement.classList.toggle('dark', d); localStorage.setItem('theme', d ? 'dark' : 'light'); };
+    setDark(localStorage.getItem('theme') === 'dark');
+    document.getElementById('theme-toggle').onclick = () => setDark(!document.documentElement.classList.contains('dark'));
+
+    let API_TOKEN = localStorage.getItem('emby-token') || '';
+    const checkAuth = async (token) => {
+      if(!token) return;
+      const res = await fetch('/auth/verify', { headers: {'X-Api-Key': token} });
+      if (res.ok) {
+        API_TOKEN = token; localStorage.setItem('emby-token', token);
+        document.getElementById('auth-screen').style.display = 'none';
+        document.getElementById('main-content').style.display = 'block';
+        loadData();
       }
+    };
+    document.getElementById('auth-btn').onclick = () => checkAuth(document.getElementById('auth-input').value);
+    if(API_TOKEN) checkAuth(API_TOKEN);
+
+    // 运营商汉化映射表
+    const ispMap = {
+      'China Mobile': '中国移动', 'China Unicom': '中国联通', 'China Telecom': '中国电信',
+      'CMCC': '中国移动', 'UNICOM': '中国联通', 'CHINANET': '中国电信'
+    };
+
+    async function loadData() {
+      const res = await fetch('/stats', { headers: {'X-Api-Key': API_TOKEN} });
+      const payload = await res.json();
+      const d = payload.data;
+      document.getElementById('user-stats-body').innerHTML = d.userStats.map(u => '<tr><td>' + u.ip.split('.').slice(0,2).join('.') + '.*</td><td>' + u.client_name + '</td><td>' + Math.round(u.duration_sec/60) + '分</td></tr>').join('');
+      
+      const commonOpt = { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } };
+      if(trendChart) trendChart.destroy();
+      trendChart = new Chart(document.getElementById('trendChart'), {
+        type: 'line', data: { labels: d.dailyStats.map(s => s.date.slice(5)).reverse(), datasets: [{ data: d.dailyStats.map(s => s.playing_count).reverse(), borderColor: '#6366f1', fill: true, tension: 0.4 }] }, options: commonOpt
+      });
+      if(deviceChart) deviceChart.destroy();
+      deviceChart = new Chart(document.getElementById('deviceChart'), {
+        type: 'doughnut', data: { labels: d.clientStats.map(c => c.client_name), datasets: [{ data: d.clientStats.map(c => c.total_count), backgroundColor: ['#6366f1', '#10b981', '#f59e0b', '#ec4899', '#a855f7'] }] }, options: { ...commonOpt, plugins: { legend: { display: true, position: 'right', labels: { boxWidth: 10, font: { size: 10 } } } } }
+      });
     }
+
+    document.getElementById('btn-open-speedtest').onclick = () => document.getElementById('speedtest-modal').hidden = false;
     
-    // 初始加载统计数据
-    fetchStats();
-    
-    // 每小时自动更新统计数据
-    setInterval(fetchStats, 3600000); // 3600000毫秒 = 1小时
+    document.getElementById('st-start-btn').onclick = async () => {
+      const btn = document.getElementById('st-start-btn');
+      const speedEl = document.getElementById('live-speed');
+      btn.disabled = true; btn.textContent = '卫星定位中...';
+      
+      try {
+        // 定位并汉化运营商
+        fetch('https://ipapi.co/json/').then(r => r.json()).then(geo => {
+          document.getElementById('st-loc').textContent = geo.region + ' ' + geo.city;
+          let rawIsp = geo.org || '';
+          let finalIsp = '未知运营商';
+          for (let key in ispMap) { if(rawIsp.toUpperCase().includes(key.toUpperCase())) { finalIsp = ispMap[key]; break; } }
+          document.getElementById('st-isp').textContent = finalIsp;
+        }).catch(() => { document.getElementById('st-loc').textContent = '定位限制'; });
+
+        const pStart = performance.now();
+        await fetch('/trace', { method: 'HEAD', headers: {'X-Api-Key': API_TOKEN}, cache: 'no-store' });
+        document.getElementById('st-ping').textContent = Math.round(performance.now() - pStart) + 'ms';
+
+        btn.textContent = '全速下行...';
+        const response = await fetch('/speedtest', { headers: {'X-Api-Key': API_TOKEN} });
+        const reader = response.body.getReader();
+        let receivedLength = 0, startTime = performance.now();
+
+        while(true) {
+          const {done, value} = await reader.read();
+          if (done) break;
+          receivedLength += value.length;
+          const duration = (performance.now() - startTime) / 1000;
+          if (duration > 0.1) speedEl.textContent = ((receivedLength * 8) / (1024 * 1024) / duration).toFixed(2);
+        }
+        btn.textContent = '重新测试';
+      } catch(e) { alert('测速已中断'); }
+      btn.disabled = false;
+    };
+    document.getElementById('stats-refresh').onclick = loadData;
   </script>
 </body>
 </html>
 `;
 
-
 export default {
   async fetch(request, env, ctx) {
-    const workerUrl = new URL(request.url);
+    const url = new URL(request.url);
 
-    // --- 1. 根路径 ---    
-    if (workerUrl.pathname === '/') {
-      return new Response(FRONTEND_HTML, {
-        headers: {
-          'Content-Type': 'text/html; charset=utf-8'
-        }
-      });
+    // 资源路由
+    if (url.pathname === '/icon.png') {
+      const icon = await fetch('https://raw.githubusercontent.com/google/material-design-icons/master/png/device/wallpaper/materialicons/48dp/1x/baseline_wallpaper_black_48dp.png');
+      return new Response(icon.body, { headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=604800' } });
     }
-    
-    // --- 2. 处理favicon.ico ---    
-    if (workerUrl.pathname === '/favicon.ico') {
-      // 返回一个空的favicon.ico响应
-      return new Response('', {
-        headers: {
-          'Content-Type': 'image/x-icon'
-        }
-      });
+    if (url.pathname === '/manifest.json') {
+      return new Response(JSON.stringify({
+        name: "Emby 控制台", short_name: "EmbyDash", start_url: "/", display: "standalone",
+        background_color: "#f8fafc", theme_color: "#6366f1",
+        icons: [{ src: "/icon.png", sizes: "48x48", type: "image/png" }]
+      }), { headers: { 'Content-Type': 'application/json' } });
     }
-    
-    // --- 3. 处理Cloudflare cdn-cgi路径 ---    
-    if (workerUrl.pathname.startsWith('/cdn-cgi/')) {
-      // 对于cdn-cgi路径，直接返回404或空响应
-      return new Response('Not Found', { status: 404 });
-    }
-    
-    // --- 4. 统计数据端点 ---    
-    if (workerUrl.pathname === '/stats') {
-      return handleStatsRequest(env);
+    if (url.pathname === '/sw.js') return new Response("self.addEventListener('fetch',()=>{})", { headers: { 'Content-Type': 'application/javascript' } });
+
+    // 地区拦截
+    if (request.cf?.country && !ALLOWED_COUNTRIES.includes(request.cf.country)) return new Response('Blocked', { status: 403 });
+
+    // 鉴权
+    const authKey = request.headers.get('X-Api-Key');
+    const isApi = ['/stats', '/trace', '/speedtest', '/auth/verify'].includes(url.pathname);
+    if (isApi) {
+      if (authKey !== PANEL_PASSWORD) return new Response('Unauthorized', { status: 401 });
+      if (url.pathname === '/auth/verify') return new Response('OK');
     }
 
+    if (url.pathname === '/') return new Response(FRONTEND_HTML, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+    if (url.pathname === '/stats') return handleStatsRequest(env);
+    if (url.pathname === '/trace') return new Response(JSON.stringify({ ip: request.headers.get('cf-connecting-ip'), loc: request.cf?.city || 'Unknown' }), { headers: { 'Cache-Control': 'no-store' } });
+    if (url.pathname === '/speedtest') {
+      return new Response(new ReadableStream({ start(c) { for(let i=0; i<15; i++) c.enqueue(SPEEDTEST_CHUNK); c.close(); } }), { headers: { 'Content-Type': 'application/octet-stream' } });
+    }
 
-    // --- 3. 解析目标 URL ---    
-    let upstreamUrl;
+    // --- 核心反代 & 客户端精准识别 ---
+    let upstream;
     try {
-        let path = workerUrl.pathname.substring(1);
-        
-        // 检查路径是否以 / 开头（处理双斜杠情况）
-        if (path.startsWith('/')) {
-            return new Response('Invalid proxy format. Please use: https://your-worker-domain/your-emby-server:port', { status: 400 });
-        }
-        
-        // 检查是否是直接访问 Sessions/Playing 等路径
-        if (path === 'Sessions/Playing' || path.startsWith('Sessions/Playing/') || path === 'PlaybackInfo' || path.startsWith('PlaybackInfo/')) {
-            return new Response('Invalid proxy format. Please use: https://your-worker-domain/your-emby-server:port', { status: 400 });
-        }
-        
-        path = path.replace(/^(https?)\/(?!\/)/, '$1://');
-        if (!path.startsWith('http')) {
-            path = 'https://' + path;
-        }
-        upstreamUrl = new URL(path);
-        upstreamUrl.search = workerUrl.search;
-        
-        // 检查是否是有效的域名格式
-        const hostname = upstreamUrl.hostname;
-        if (!hostname || hostname === 'Sessions' || hostname === 'PlaybackInfo') {
-            return new Response('Invalid proxy format. Please use: https://your-worker-domain/your-emby-server:port', { status: 400 });
-        }
-    } catch (e) {
-      return new Response('Invalid URL format. Please use: https://your-worker-domain/your-emby-server:port', { status: 400 });
+      let p = url.pathname.slice(1).replace(/^(https?)\/(?!\/)/, '$1://');
+      if (!/^https?:\/\//i.test(p)) p = 'https://' + p;
+      upstream = new URL(p); upstream.search = url.search;
+    } catch { return new Response('Invalid URL', { status: 400 }); }
+
+    // 🚀 增强识别逻辑
+    const embyClient = request.headers.get('X-Emby-Client') || '';
+    const userAgent = request.headers.get('User-Agent') || '';
+    let clientName = embyClient || '未知设备';
+
+    if (userAgent.includes('VidHub') || embyClient.includes('VidHub')) clientName = 'VidHub';
+    else if (userAgent.includes('Popcorn') || embyClient.includes('Popcorn') || userAgent.includes('爆米花')) clientName = '网易爆米花';
+    else if (userAgent.includes('Infuse') || embyClient.includes('Infuse')) clientName = 'Infuse';
+    else if (userAgent.includes('Fileball')) clientName = 'Fileball';
+    else if (userAgent.includes('Firefox')) clientName = '火狐浏览器';
+    else if (userAgent.includes('Chrome')) clientName = '谷歌浏览器';
+    else if (userAgent.includes('Safari')) clientName = 'Safari浏览器';
+
+    if (upstream.pathname.includes('/Playing/Progress')) {
+      ctx.waitUntil(recordUserAudit(env, request.headers.get('cf-connecting-ip') || '0.0.0.0', clientName, 10));
+    }
+    if (upstream.pathname.endsWith('/Sessions/Playing') || upstream.pathname.includes('/PlaybackInfo')) {
+      ctx.waitUntil(recordBasicStats(env, upstream.pathname.endsWith('/Sessions/Playing') ? 'playing' : 'playback', clientName));
     }
 
+    const options = { method: request.method, headers: new Headers(request.headers) };
+    options.headers.set('Host', upstream.host);
+    if (/\.(jpeg|jpg|png|gif|css|js|woff2)$/i.test(upstream.pathname)) options.cf = { cacheTtl: 7200, cacheEverything: true };
 
-// [优化] --- 判断是否需要走美西 ---
-
-
-    // 1.流量不是来自日本，直接跳过，根本不用浪费 CPU 去算域名后缀
-    const currentEdgeColo = request.cf?.colo;
-
-    if (currentEdgeColo && JP_COLOS.includes(currentEdgeColo)) {
-        
-
-        const originalHost = upstreamUrl.host; 
-        
-        for (const domainSuffix in DOMAIN_PROXY_RULES) {
-            if (originalHost.endsWith(domainSuffix)) {
-                upstreamUrl.hostname = DOMAIN_PROXY_RULES[domainSuffix];
-                break; 
-            }
-        }
-    }
-    // [结束] --- 判断是否需要走美西 ---
-
-    // [新增] --- 统计逻辑开始 ---
-    // 这里的 upstreamUrl.pathname 才是 Emby 的真实 API 路径
-    // 使用 ctx.waitUntil 确保不阻塞后续的反代请求
-    if (upstreamUrl.pathname.endsWith('/Sessions/Playing')) {
-        ctx.waitUntil(recordStats(env, 'playing'));
-    } else if (upstreamUrl.pathname.includes('/PlaybackInfo')) {
-        ctx.waitUntil(recordStats(env, 'playback_info'));
-    }
-    // [新增] --- 统计逻辑结束 ---
-
-    // --- 4. WebSocket ---
-    const upgradeHeader = request.headers.get('Upgrade');
-    if (upgradeHeader && upgradeHeader.toLowerCase() === 'websocket') {
-      return fetch(upstreamUrl.toString(), request);
-    }
-
-    // --- 5. 构造请求头 ---
-    const upstreamRequestHeaders = new Headers(request.headers);
-    upstreamRequestHeaders.set('Host', upstreamUrl.host);
-    upstreamRequestHeaders.delete('Referer'); 
-    
-    const clientIp = request.headers.get('cf-connecting-ip');
-    if (clientIp) {
-        upstreamRequestHeaders.set('x-forwarded-for', clientIp);
-        upstreamRequestHeaders.set('x-real-ip', clientIp);
-    }
-
-    const upstreamRequest = new Request(upstreamUrl.toString(), {
-      method: request.method,
-      headers: upstreamRequestHeaders,
-      body: request.body,
-      redirect: 'manual', // 禁止自动跟随，手动处理
-    });
-
-    // --- 6. 发起请求 ---
-    const upstreamResponse = await fetch(upstreamRequest);
-
-    // --- 7. 处理重定向 (核心修复区域) ---
-    const location = upstreamResponse.headers.get('Location');
-    if (location && upstreamResponse.status >= 300 && upstreamResponse.status < 400) {
-      try {
-        // [修复 1]: 处理相对路径重定向，基于 upstreamUrl 补全
-        const redirectUrl = new URL(location, upstreamUrl);
-        
-        // 策略 A: 白名单直连
-        if (MANUAL_REDIRECT_DOMAINS.some(domain => redirectUrl.hostname.endsWith(domain))) {
-          // [优化]: 确保返回给客户端的是绝对路径，防止客户端在 Worker 域名下跳转
-          const responseHeaders = new Headers(upstreamResponse.headers);
-          responseHeaders.set('Location', redirectUrl.toString());
-          return new Response(upstreamResponse.body, {
-            status: upstreamResponse.status,
-            statusText: upstreamResponse.statusText,
-            headers: responseHeaders
-          });
-        }
-        
-        // 策略 B: Worker 内部代理跟随
-        const followHeaders = new Headers(upstreamRequestHeaders);
-        // [修复 2]: 更新 Host 头
-        followHeaders.set('Host', redirectUrl.host);
-        
-        // [修复 3]: 使用完整的绝对 URL 发起 fetch
-        return fetch(redirectUrl.toString(), {
-            method: request.method,
-            headers: followHeaders,
-            body: request.body,
-            redirect: 'follow'
-        });
-
-      } catch (e) {
-        return upstreamResponse;
-      }
-    }
-
-    // --- 8. 处理常规响应 ---
-    const responseHeaders = new Headers(upstreamResponse.headers);
-    responseHeaders.set('Access-Control-Allow-Origin', '*');
-    responseHeaders.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    responseHeaders.set('Access-Control-Allow-Headers', '*');
-    responseHeaders.delete('Content-Security-Policy');
-    responseHeaders.delete('X-Frame-Options');
-
-    return new Response(upstreamResponse.body, {
-      status: upstreamResponse.status,
-      statusText: upstreamResponse.statusText,
-      headers: responseHeaders,
-    });
-  },
+    return fetch(upstream.toString(), options);
+  }
 };
 
-// [新增] --- 统计工具函数 ---
-async function recordStats(env, type) {
-    try {
-        // 使用 Asia/Shanghai 时区生成日期字符串 (YYYY-MM-DD)
-        const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' });
-
-        // 检查 DB 是否绑定
-        if (!env.DB) {
-            console.error("D1 数据库未绑定，变量名需为 'DB'");
-            return;
-        }
-
-        let query = "";
-        let params = [];
-
-        if (type === 'playing') {
-            // 记录播放次数
-            query = `
-                INSERT INTO auto_emby_daily_stats (date, playing_count, playback_info_count) 
-                VALUES (?, 1, 0) 
-                ON CONFLICT(date) DO UPDATE SET playing_count = playing_count + 1
-            `;
-            params = [today];
-        } else if (type === 'playback_info') {
-            // 记录获取链接次数
-            query = `
-                INSERT INTO auto_emby_daily_stats (date, playing_count, playback_info_count) 
-                VALUES (?, 0, 1) 
-                ON CONFLICT(date) DO UPDATE SET playback_info_count = playback_info_count + 1
-            `;
-            params = [today];
-        }
-
-        if (query) {
-            await env.DB.prepare(query).bind(...params).run();
-        }
-
-    } catch (e) {
-        console.error('统计写入失败:', e);
-    }
+async function recordBasicStats(env, type, client) {
+  if (!env.DB) return;
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' });
+  const col = type === 'playing' ? 'playing_count' : 'playback_info_count';
+  const sql = "INSERT INTO auto_emby_daily_stats (date, " + col + ") VALUES (?, 1) ON CONFLICT(date) DO UPDATE SET " + col + " = " + col + " + 1";
+  await env.DB.prepare(sql).bind(today).run();
+  await env.DB.prepare("INSERT INTO auto_emby_client_stats (date, client_name, count) VALUES (?, ?, 1) ON CONFLICT(date, client_name) DO UPDATE SET count = count + 1").bind(today, client).run();
 }
 
-// [新增] --- 处理统计数据请求 ---
+async function recordUserAudit(env, ip, client, sec) {
+  if (!env.DB) return;
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' });
+  await env.DB.prepare("INSERT INTO auto_emby_user_stats (date, ip, client_name, duration_sec) VALUES (?, ?, ?, ?) ON CONFLICT(date, ip, client_name) DO UPDATE SET duration_sec = duration_sec + ?").bind(today, ip, client, sec, sec).run();
+}
+
 async function handleStatsRequest(env) {
-    try {
-        // 检查 DB 是否绑定
-        if (!env.DB) {
-            return new Response(JSON.stringify({
-                error: "D1 数据库未绑定，变量名需为 'DB'",
-                data: null
-            }), {
-                headers: {
-                    'Content-Type': 'application/json; charset=utf-8'
-                }
-            });
-        }
-
-        // 查询最近10天统计数据（使用北京时间）
-        const statsQuery = `
-            SELECT * FROM auto_emby_daily_stats 
-            WHERE date >= date(datetime('now', '+8 hours'), '-10 days')
-            ORDER BY date DESC
-        `;
-        const statsResult = await env.DB.prepare(statsQuery).all();
-
-        // 查询最近30天总计数据（使用北京时间）
-        const totalQuery = `
-            SELECT 
-                SUM(playing_count) as total_playing, 
-                SUM(playback_info_count) as total_playback_info 
-            FROM auto_emby_daily_stats
-            WHERE date >= date(datetime('now', '+8 hours'), '-30 days')
-        `;
-        const totalResult = await env.DB.prepare(totalQuery).first();
-
-        return new Response(JSON.stringify({
-            error: null,
-            data: {
-                dailyStats: statsResult.results || [],
-                total: {
-                    playing: totalResult?.total_playing || 0,
-                    playbackInfo: totalResult?.total_playback_info || 0
-                },
-                lastUpdated: new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
-            }
-        }), {
-            headers: {
-                'Content-Type': 'application/json; charset=utf-8'
-            }
-        });
-
-    } catch (e) {
-        console.error('统计查询失败:', e);
-        return new Response(JSON.stringify({
-            error: '统计查询失败: ' + e.message,
-            data: null
-        }), {
-            headers: {
-                'Content-Type': 'application/json; charset=utf-8'
-            }
-        });
-    }
+  if (!env.DB) return new Response(JSON.stringify({enabled:false}));
+  const batch = await env.DB.batch([
+    env.DB.prepare("SELECT date, playing_count FROM auto_emby_daily_stats ORDER BY date DESC LIMIT 10"),
+    env.DB.prepare("SELECT ip, client_name, SUM(duration_sec) as duration_sec FROM auto_emby_user_stats GROUP BY ip, client_name ORDER BY duration_sec DESC LIMIT 10"),
+    env.DB.prepare("SELECT client_name, SUM(count) as total_count FROM auto_emby_client_stats GROUP BY client_name ORDER BY total_count DESC LIMIT 5")
+  ]);
+  return new Response(JSON.stringify({
+    ok: true, enabled: true,
+    data: { dailyStats: batch[0].results, userStats: batch[1].results, clientStats: batch[2].results }
+  }));
 }
