@@ -5,7 +5,7 @@
  */
 
 const PANEL_PASSWORD = 'emby'; // 访问密码
-const ALLOWED_COUNTRIES = ['CN'];
+const ALLOWED_COUNTRIES = [];
 const SPEEDTEST_CHUNK = new Uint8Array(1024 * 1024);
 
 const FRONTEND_HTML = `
