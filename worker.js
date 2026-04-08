@@ -1,14 +1,17 @@
 /**
  * =================================================================================
- * Cloudflare Worker Emby 终极修复版 v5.0 (原味动态代理 + 隐形大屏 + 补全 POST)
+ * Cloudflare Worker Emby 终极版 v6.0 (纯净专线直连 + 登录数据透传修复 + 隐形大屏)
  * =================================================================================
  */
+
+// ⚠️ 核心配置区：在这里写死你朋友的源站地址
+const TARGET_EMBY_SERVER = 'https://link00.okemby.org:8443'; 
 
 const PANEL_PASSWORD = 'emby'; // 控制台访问密码
 const SPEEDTEST_CHUNK = new Uint8Array(1024 * 1024);
 
 // =====================================
-// 🧠 内存级全局配置缓存 (保护 D1 额度)
+// 🧠 内存级全局配置缓存
 // =====================================
 let CACHED_CONFIG = { allowedRegions: [], blacklist: [], expire: 0 };
 
@@ -352,6 +355,7 @@ export default {
     const city = request.cf?.city || '';
     const colo = request.cf?.colo || 'N/A';
 
+    // 💡 放行 /dash 路径，防止自己被黑名单或地理围栏挡住进不去后台
     if (url.pathname !== '/dash' && !url.pathname.startsWith('/api')) {
         if (config.blacklist.includes(clientIp)) {
           return new Response(getBlockedHTML(clientIp, countryCode, city, colo, 'banned'), { status: 403, headers: { 'Content-Type': 'text/html; charset=utf-8' }});
@@ -410,27 +414,19 @@ export default {
     }
 
     // =====================================
-    // 🎬 核心还原：完美匹配 GitHub 版的动态路径引擎
+    // 🎬 Emby 核心：纯净的专线代理逻辑 (硬编码目标服务器)
     // =====================================
-    let upstream;
+    let upstream = new URL(request.url);
     try {
-      // 提取斜杠后面的目标网址（兼容客户端的多层嵌套路径）
-      let targetStr = url.pathname.replace(/^\/+/, '');
-      targetStr = targetStr.replace(/^(https?):\/(?!\/)/i, '$1://');
-      
-      // 容错机制：如果没有带 http，说明不是正常的动态代理请求
-      if (!/^https?:\/\//i.test(targetStr)) {
-        return new Response('Invalid Request. Please use format: /https://target.com', { status: 400 });
-      }
-
-      upstream = new URL(targetStr);
-      upstream.search = url.search; // 保留所有查询参数
-      
+      const targetURL = new URL(TARGET_EMBY_SERVER);
+      upstream.protocol = targetURL.protocol;
+      upstream.hostname = targetURL.hostname;
+      upstream.port = targetURL.port;
+      // 注意：upstream.pathname (如 /emby/System/Info) 原封不动透传！
     } catch {
-      return new Response('动态解析 URL 失败', { status: 400 });
+      return new Response('Invalid TARGET_EMBY_SERVER URL configured in Worker.', { status: 500 });
     }
 
-    // 深入解析客户端探针
     let rawClientName = request.headers.get('X-Emby-Client') || '';
     const userAgent = request.headers.get('User-Agent') || '';
     let clientName = rawClientName;
@@ -456,23 +452,19 @@ export default {
     if (upstream.pathname.includes('/Playing/Progress')) ctx.waitUntil(recordUserAudit(env, clientIp, clientName, 10));
     if (upstream.pathname.endsWith('/Sessions/Playing') || upstream.pathname.includes('/PlaybackInfo')) ctx.waitUntil(recordBasicStats(env, upstream.pathname.endsWith('/Sessions/Playing') ? 'playing' : 'playback', clientName));
 
-    // =====================================
-    // 🚀 终极 Bug 修复：完整透传 POST 请求与提速
-    // =====================================
+    // 🚀 终极修复：确保非 GET 请求的 Body 被完美透传！
     const options = { 
-      method: request.method, 
-      headers: new Headers(request.headers),
-      redirect: 'manual'
+        method: request.method, 
+        headers: new Headers(request.headers),
+        redirect: 'manual' 
     };
-    
-    // 💡 致命核心：如果丢了 body，Emby 登录和请求播放将直接报错！
     if (request.method !== 'GET' && request.method !== 'HEAD') {
-      options.body = request.body;
+        options.body = request.body;
     }
 
     options.headers.set('Host', upstream.host);
     
-    // 流媒体缓存与压缩优化
+    // 首屏加速与透传优化
     if (/\.(jpeg|jpg|png|gif|css|js|woff2|woff|ttf)$/i.test(upstream.pathname)) {
       options.cf = { cacheTtl: 7200, cacheEverything: true };
     } else if (/\.(mp4|mkv|ts|webm|m3u8|flv|aac|mp3)$/i.test(upstream.pathname) || upstream.pathname.includes('/stream') || upstream.pathname.includes('/PlaybackInfo')) {
