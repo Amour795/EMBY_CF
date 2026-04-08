@@ -1,327 +1,527 @@
 /**
  * =================================================================================
- * Cloudflare Worker Emby 终极版 v11.0 (全功能大屏 + 身份证拦截 + 变量驱动)
+ * Cloudflare Worker Emby 终极安全版 v7.0 (纯净专线直连 + 环境变量解耦防泄漏)
  * =================================================================================
+ * ⚠️ 警告：不要在此代码中写死任何密码或服务器地址！
+ * 请前往 Cloudflare -> Settings -> Variables and Secrets 设置以下环境变量：
+ * 1. TARGET_EMBY_SERVER (你的 Emby 源站带端口地址)
+ * 2. PANEL_PASSWORD (加密机密 - 大屏后台密码)
  */
 
 const SPEEDTEST_CHUNK = new Uint8Array(1024 * 1024);
+
+// =====================================
+// 🧠 内存级全局配置缓存
+// =====================================
 let CACHED_CONFIG = { allowedRegions: [], blacklist: [], expire: 0 };
 
-// --- 🛑 拦截界面：显示访问者详细网络身份证 ---
-function getBlockedHTML(ip, cf, reason = 'region') {
-  const countryMap = { 'CN': '中国大陆', 'HK': '中国香港', 'TW': '中国台湾', 'SG': '新加坡', 'JP': '日本', 'US': '美国' };
-  const countryName = countryMap[cf.country] || cf.country || '未知国家';
-  const isp = cf.asOrganization || '未知运营商';
-  const title = reason === 'banned' ? '账号异常封禁' : '触发访问限制';
-  const icon = reason === 'banned' ? '🚫' : '🚧';
-
-  return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1"><title>🛑 ${title}</title><style>:root { --bg: #0f172a; --card-bg: rgba(30, 41, 59, 0.85); --text: #f8fafc; --accent: #6366f1; --border: rgba(255,255,255,0.1); }body { background: var(--bg); color: var(--text); font-family: system-ui, sans-serif; height: 100vh; display: flex; align-items: center; justify-content: center; margin: 0; padding: 1rem; box-sizing: border-box; }.card { background: var(--card-bg); backdrop-filter: blur(16px); border: 1px solid var(--border); border-radius: 28px; padding: 2.5rem 2rem; width: 100%; max-width: 420px; text-align: center; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5); }.icon { font-size: 4.5rem; margin-bottom: 1.2rem; display: block; }h2 { font-size: 1.6rem; margin: 0 0 0.8rem; color: #ef4444; }p { color: #94a3b8; line-height: 1.6; margin-bottom: 2rem; }.info-list { background: rgba(0,0,0,0.25); border-radius: 20px; padding: 1.2rem; text-align: left; }.info-item { display: flex; justify-content: space-between; padding: 0.7rem 0; font-size: 0.85rem; border-bottom: 1px solid rgba(255,255,255,0.05); }.info-item:last-child { border-bottom: none; }.label { color: #64748b; }.val { font-family: monospace; color: var(--accent); font-weight: 600; }</style></head><body><div class="card"><span class="icon">${icon}</span><h2>${title}</h2><p>当前所在地区暂未开放访问，请联系站长开通。</p><div class="info-list"><div class="info-item"><span class="label">访问 IP</span><span class="val">${ip}</span></div><div class="info-item"><span class="label">物理位置</span><span class="val">${countryName} ${cf.city || ''}</span></div><div class="info-item"><span class="label">运营商</span><span class="val">${isp}</span></div><div class="info-item"><span class="label">CF 节点</span><span class="val">${cf.colo || 'N/A'}</span></div></div></div></body></html>`;
-}
-
-// --- 📊 全功能数据大屏前端 ---
-const FRONTEND_HTML = `
-<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Emby 运维审计大屏</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <style>
-        body { background-color: #0b0e14; color: #e2e8f0; font-family: 'Inter', system-ui, sans-serif; }
-        .glass { background: rgba(23, 28, 36, 0.7); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.05); }
-        .stat-card { transition: transform 0.3s ease; }
-        .stat-card:hover { transform: translateY(-5px); }
-        ::-webkit-scrollbar { width: 6px; }
-        ::-webkit-scrollbar-thumb { background: #2d3748; border-radius: 10px; }
-    </style>
-</head>
-<body class="p-4 md:p-8">
-    <div class="max-w-7xl mx-auto">
-        <div class="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4">
-            <div>
-                <h1 class="text-3xl font-black bg-gradient-to-r from-indigo-400 via-purple-400 to-pink-400 bg-clip-text text-transparent">EMBY DASHBOARD</h1>
-                <p class="text-gray-500 text-sm mt-1">实时流量审计与接入安全控制系统</p>
-            </div>
-            <div class="flex gap-3">
-                <button onclick="toggleRegionConfig()" class="glass px-4 py-2 rounded-xl text-sm border-indigo-500/30 text-indigo-400 hover:bg-indigo-500/10 transition">地区策略</button>
-                <button onclick="location.reload()" class="glass px-4 py-2 rounded-xl text-sm border-gray-700 hover:bg-white/5 transition">刷新数据</button>
-            </div>
-        </div>
-
-        <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
-            <div class="glass p-6 rounded-3xl stat-card">
-                <div class="text-gray-500 text-xs font-bold uppercase tracking-wider mb-2">活跃播放</div>
-                <div id="playingNow" class="text-4xl font-black text-indigo-400">0</div>
-            </div>
-            <div class="glass p-6 rounded-3xl stat-card">
-                <div class="text-gray-500 text-xs font-bold uppercase tracking-wider mb-2">全天请求</div>
-                <div id="totalRequests" class="text-4xl font-black text-cyan-400">0</div>
-            </div>
-            <div class="glass p-6 rounded-3xl stat-card">
-                <div class="text-gray-500 text-xs font-bold uppercase tracking-wider mb-2">平均延迟</div>
-                <div id="avgPing" class="text-4xl font-black text-emerald-400">-- <span class="text-sm">ms</span></div>
-            </div>
-            <div class="glass p-6 rounded-3xl stat-card">
-                <div class="text-gray-500 text-xs font-bold uppercase tracking-wider mb-2">拦截威胁</div>
-                <div id="blockedCount" class="text-4xl font-black text-rose-500">0</div>
-            </div>
-        </div>
-
-        <div class="grid grid-cols-1 lg:grid-cols-3 gap-8 mb-8">
-            <div class="lg:col-span-2 glass p-8 rounded-[2rem]">
-                <h3 class="text-lg font-bold mb-6 flex items-center gap-2"><span class="w-2 h-2 bg-indigo-500 rounded-full"></span> 播放量趋势 (24h)</h3>
-                <div class="h-[300px]"><canvas id="trendChart"></canvas></div>
-            </div>
-            <div class="glass p-8 rounded-[2rem]">
-                <h3 class="text-lg font-bold mb-6 flex items-center gap-2"><span class="w-2 h-2 bg-pink-500 rounded-full"></span> 客户端分布</h3>
-                <div class="h-[300px] flex items-center justify-center"><canvas id="clientChart"></canvas></div>
-            </div>
-        </div>
-
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
-            <div class="glass p-8 rounded-[2rem] overflow-hidden">
-                <h3 class="text-lg font-bold mb-6">活跃用户审计</h3>
-                <div class="overflow-x-auto">
-                    <table class="w-full text-left">
-                        <thead><tr class="text-gray-500 text-xs border-b border-white/5"><th class="pb-4">用户/IP</th><th class="pb-4">终端</th><th class="pb-4">累计时长</th><th class="pb-4">操作</th></tr></thead>
-                        <tbody id="userTableBody" class="text-sm"></tbody>
-                    </table>
-                </div>
-            </div>
-            <div class="glass p-8 rounded-[2rem]">
-                <h3 class="text-lg font-bold mb-6">节点性能监控 (Speedtest)</h3>
-                <div id="speedLogList" class="space-y-4"></div>
-            </div>
-        </div>
-    </div>
-
-    <div id="regionModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm hidden flex items-center justify-center p-4 z-50">
-        <div class="glass p-8 rounded-[2.5rem] max-w-md w-full border-white/10">
-            <h3 class="text-2xl font-bold mb-4">区域访问控制</h3>
-            <p class="text-gray-400 text-sm mb-6">勾选允许访问的地区，其余地区将显示拦截页面。</p>
-            <div class="grid grid-cols-2 gap-4 mb-8" id="regionList">
-                <label class="flex items-center gap-3 p-3 glass rounded-2xl cursor-pointer"><input type="checkbox" value="CN" class="w-5 h-5 rounded-lg accent-indigo-500"> 中国大陆</label>
-                <label class="flex items-center gap-3 p-3 glass rounded-2xl cursor-pointer"><input type="checkbox" value="HK" class="w-5 h-5 rounded-lg accent-indigo-500"> 中国香港</label>
-                <label class="flex items-center gap-3 p-3 glass rounded-2xl cursor-pointer"><input type="checkbox" value="TW" class="w-5 h-5 rounded-lg accent-indigo-500"> 中国台湾</label>
-                <label class="flex items-center gap-3 p-3 glass rounded-2xl cursor-pointer"><input type="checkbox" value="SG" class="w-5 h-5 rounded-lg accent-indigo-500"> 新加坡</label>
-            </div>
-            <div class="flex gap-4">
-                <button onclick="saveRegions()" class="flex-1 bg-indigo-600 hover:bg-indigo-500 py-3 rounded-2xl font-bold transition">应用更改</button>
-                <button onclick="toggleRegionConfig()" class="px-6 py-3 glass rounded-2xl">取消</button>
-            </div>
-        </div>
-    </div>
-
-    <script>
-        let apiKey = localStorage.getItem('emby_admin_key');
-        let trendChart, clientChart;
-
-        async function api(path, method = 'GET', body = null) {
-            const headers = { 'X-Api-Key': apiKey, 'Content-Type': 'application/json' };
-            const options = { method, headers };
-            if (body) options.body = JSON.stringify(body);
-            const res = await fetch(path, options);
-            if (res.status === 401) {
-                apiKey = prompt('🔐 请输入管理密码:');
-                localStorage.setItem('emby_admin_key', apiKey);
-                return api(path, method, body);
-            }
-            return res.json();
-        }
-
-        async function refresh() {
-            const res = await api('/stats');
-            if (!res.ok) return;
-            const data = res.data;
-
-            document.getElementById('playingNow').innerText = data.total.playing;
-            document.getElementById('totalRequests').innerText = data.total.playbackInfo;
-            
-            // 渲染表格
-            const tbody = document.getElementById('userTableBody');
-            tbody.innerHTML = data.userStats.map(u => \`
-                <tr class="border-b border-white/5">
-                    <td class="py-4"><div class="font-bold">\${u.ip}</div><div class="text-xs text-gray-500">用户审计</div></td>
-                    <td class="py-4 text-gray-400">\${u.client_name}</td>
-                    <td class="py-4 font-mono">\${(u.duration_sec/3600).toFixed(1)} h</td>
-                    <td class="py-4"><button onclick="banIp('\${u.ip}')" class="text-rose-500 hover:underline">封禁</button></td>
-                </tr>
-            \`).join('');
-
-            // 渲染测速
-            const speedBox = document.getElementById('speedLogList');
-            speedBox.innerHTML = data.speedLogs.map(s => \`
-                <div class="flex justify-between items-center p-4 glass rounded-2xl">
-                    <div><div class="text-sm font-bold">\${s.loc}</div><div class="text-xs text-gray-500">\${s.isp}</div></div>
-                    <div class="text-right"><div class="text-emerald-400 font-bold">\${s.speed_mbps} Mbps</div><div class="text-xs text-gray-500">\${s.ping}ms</div></div>
-                </div>
-            \`).join('');
-
-            renderCharts(data);
-        }
-
-        function renderCharts(data) {
-            const ctx1 = document.getElementById('trendChart').getContext('2d');
-            if(trendChart) trendChart.destroy();
-            trendChart = new Chart(ctx1, {
-                type: 'line',
-                data: {
-                    labels: data.dailyStats.map(s => s.date).reverse(),
-                    datasets: [{
-                        label: '播放请求',
-                        data: data.dailyStats.map(s => s.playing_count).reverse(),
-                        borderColor: '#818cf8',
-                        backgroundColor: 'rgba(129, 140, 248, 0.1)',
-                        fill: true,
-                        tension: 0.4
-                    }]
-                },
-                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { grid: { color: 'rgba(255,255,255,0.05)' } } } }
-            });
-
-            const ctx2 = document.getElementById('clientChart').getContext('2d');
-            if(clientChart) clientChart.destroy();
-            clientChart = new Chart(ctx2, {
-                type: 'doughnut',
-                data: {
-                    labels: data.clientStats.map(c => c.client_name),
-                    datasets: [{
-                        data: data.clientStats.map(c => c.total_count),
-                        backgroundColor: ['#6366f1', '#a855f7', '#ec4899', '#f43f5e', '#f59e0b']
-                    }]
-                },
-                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom', labels: { color: '#94a3b8' } } } }
-            });
-        }
-
-        function toggleRegionConfig() { document.getElementById('regionModal').classList.toggle('hidden'); }
-        async function saveRegions() {
-            const selected = Array.from(document.querySelectorAll('#regionList input:checked')).map(i => i.value);
-            await api('/api/config', 'POST', { allowedRegions: selected });
-            alert('策略已应用！');
-            toggleRegionConfig();
-        }
-        async function banIp(ip) {
-            if(confirm('确定要永久封禁 IP: ' + ip + ' 吗？')) {
-                await api('/api/ban', 'POST', { ip });
-                alert('已拉黑');
-                refresh();
-            }
-        }
-
-        refresh();
-        setInterval(refresh, 30000);
-    </script>
-</body>
-</html>
-`;
-
-// --- 🧠 后端逻辑：数据库与代理核心 ---
 async function syncConfig(env) {
   if (!env.DB) return { allowedRegions: [], blacklist: [] };
   const now = Date.now();
   if (CACHED_CONFIG.expire > now) return CACHED_CONFIG;
+  
   try {
     const resRegions = await env.DB.prepare("SELECT value FROM auto_emby_config WHERE key = 'allowed_regions'").first();
     CACHED_CONFIG.allowedRegions = resRegions ? JSON.parse(resRegions.value) : [];
+  } catch(e) { CACHED_CONFIG.allowedRegions = []; }
+
+  try {
     const resBan = await env.DB.prepare("SELECT ip FROM auto_emby_blacklist").all();
     CACHED_CONFIG.blacklist = resBan.results ? resBan.results.map(r => r.ip) : [];
-    CACHED_CONFIG.expire = now + 60000;
-  } catch(e) {}
+  } catch(e) { CACHED_CONFIG.blacklist = []; }
+
+  CACHED_CONFIG.expire = now + 60000;
   return CACHED_CONFIG;
 }
+
+// =====================================
+// 🛑 动态拦截页 HTML 模板
+// =====================================
+function getBlockedHTML(ip, countryCode, city, colo, reason = 'region') {
+  const countryMap = { 'CN': '中国大陆', 'HK': '中国香港', 'TW': '中国台湾', 'SG': '新加坡', 'JP': '日本', 'KR': '韩国', 'US': '美国', 'GB': '英国' };
+  const locName = (countryMap[countryCode] || countryCode) + (city ? ' ' + city : '');
+  const title = reason === 'banned' ? '账号异常封禁' : '结界已触发';
+  const desc = reason === 'banned' ? '系统检测到您的 IP 存在异常行为，当前设备已被永久封禁。' : '站长开启了严格的区域访问控制策略，当前所在地区暂未开放访问。';
+  const icon = reason === 'banned' ? '🚫' : '🚧';
+  
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>🛑 访问受限</title>
+  <style>
+    :root { --bg-color: #f8fafc; --panel-bg: rgba(255, 255, 255, 0.9); --text-main: #0f172a; --border: rgba(226, 232, 240, 0.8); }
+    @media (prefers-color-scheme: dark) { :root { --bg-color: #0f172a; --panel-bg: rgba(30, 41, 59, 0.85); --text-main: #f8fafc; --border: rgba(51, 65, 85, 0.8); } }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: -apple-system, sans-serif; background-color: var(--bg-color); color: var(--text-main); min-height: 100vh; display: flex; align-items: center; overflow-x: hidden; }
+    .page { padding: 1rem; width: 100%; max-width: 420px; margin: 0 auto; }
+    .panel { background: var(--panel-bg); border: 1px solid var(--border); border-radius: 16px; box-shadow: 0 20px 40px -15px rgba(0,0,0,0.2); padding: 0.8rem; backdrop-filter: blur(10px); text-align: center; }
+    .inner-content { padding: 1rem 0.5rem; }
+    .icon { font-size: 4rem; margin-bottom: 0.5rem; line-height: 1; }
+    h2 { margin: 0 0 1rem 0; color: #ef4444; font-size: 1.4rem; }
+    p { color: #64748b; font-size: 0.9rem; margin-bottom: 1.5rem; line-height: 1.5; }
+    .info-box { background: rgba(100, 116, 139, 0.05); border-radius: 12px; padding: 1rem; text-align: left; border: 1px solid var(--border); width: 100%; }
+    .info-item { display: flex; justify-content: space-between; align-items: flex-start; font-size: 0.85rem; padding: 0.4rem 0; border-bottom: 1px dashed var(--border); gap: 1rem; }
+    .info-item:last-child { border-bottom: none; padding-bottom: 0; }
+    .info-label { color: #64748b; white-space: nowrap; flex-shrink: 0; }
+    .info-val { font-weight: 700; color: #6366f1; font-family: monospace; word-break: break-all; text-align: right; }
+  </style>
+</head>
+<body>
+  <div class="page"><div class="panel"><div class="inner-content">
+    <div class="icon">${icon}</div><h2>${title}</h2><p>${desc}</p>
+    <div class="info-box">
+      <div class="info-item"><span class="info-label">您的 IP:</span><span class="info-val">${ip}</span></div>
+      <div class="info-item"><span class="info-label">物理位置:</span><span class="info-val">${locName}</span></div>
+      <div class="info-item"><span class="info-label">拦截节点:</span><span class="info-val">${colo}</span></div>
+    </div>
+  </div></div></div>
+</body></html>`;
+}
+
+// =====================================
+// 📊 数据大屏 HTML (折叠区)
+// =====================================
+const FRONTEND_HTML = `
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <title>Emby 运维大屏</title>
+  <link rel="manifest" href="/manifest.json">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <link rel="icon" type="image/png" href="/icon.png">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <style>
+    :root { --bg-color: #f8fafc; --panel-bg: rgba(255, 255, 255, 0.85); --modal-bg: #ffffff; --text-main: #0f172a; --text-soft: #475569; --text-muted: #94a3b8; --border: rgba(226, 232, 240, 0.8); --primary: #6366f1; --gradient-brand: linear-gradient(135deg, #6366f1 0%, #a855f7 100%); --shadow-lg: 0 20px 40px -15px rgba(99, 102, 241, 0.15); }
+    html.dark { --bg-color: #0f172a; --panel-bg: rgba(30, 41, 59, 0.75); --modal-bg: #1e293b; --text-main: #f8fafc; --text-soft: #cbd5e1; --text-muted: #64748b; --border: rgba(51, 65, 85, 0.8); --primary: #818cf8; }
+    * { box-sizing: border-box; transition: background-color 0.2s; }
+    body { margin: 0; font-family: -apple-system, sans-serif; background-color: var(--bg-color); color: var(--text-main); min-height: 100vh; overflow-x: hidden; }
+    .page { padding: 1rem; width: min(100%, 1200px); margin: 0 auto; }
+    .panel { background: var(--panel-bg); border: 1px solid var(--border); border-radius: 16px; box-shadow: var(--shadow-lg); backdrop-filter: blur(10px); padding: 0.8rem; margin-bottom: 0.8rem; }
+    .hero__title { font-size: 1.4rem; margin: 0; font-weight: 800; display: flex; align-items: center; justify-content: space-between; }
+    .button { appearance: none; display: inline-flex; align-items: center; justify-content: center; gap: 0.4rem; border: none; border-radius: 999px; padding: 0.5rem 1rem; font-weight: 600; cursor: pointer; font-size: 0.85rem; }
+    .button--primary { background: var(--gradient-brand); color: white; }
+    .button--secondary { background: transparent; color: var(--text-main); border: 1px solid var(--border); }
+    .chart-container { position: relative; height: 160px; width: 100%; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; table-layout: fixed; }
+    th, td { padding: 0.5rem 0.2rem; border-bottom: 1px solid var(--border); text-align: left; vertical-align: middle; word-wrap: break-word; }
+    th { color: var(--text-soft); font-weight: 600; font-size: 0.75rem; }
+    #auth-screen { position: fixed; inset: 0; z-index: 9999; background: var(--bg-color); display: flex; align-items: center; justify-content: center; padding: 1rem;}
+    .input-field { width: 100%; padding: 0.8rem; border-radius: 10px; border: 2px solid var(--border); background: var(--modal-bg); color: var(--text-main); margin-bottom: 1rem; outline: none;}
+    .modal { position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center; padding: 1rem; }
+    .modal[hidden] { display: none !important; }
+    .modal-overlay { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(8px); }
+    .modal-content { position: relative; width: 100%; max-width: 440px; background: var(--modal-bg); border-radius: 16px; padding: 1rem; max-height: 90vh; overflow-y: auto;}
+    .st-item { display: flex; justify-content: space-between; border-bottom: 1px dashed var(--border); padding: 0.4rem 0; font-size: 0.85rem;}
+    .speed-number { font-size: 2.2rem; font-weight: 800; color: var(--primary); display: block; text-align: center; margin: 0.5rem 0; font-family: monospace; }
+    .stat-val { font-size: 1.6rem; font-weight: 800; color: var(--primary); }
+    .stat-label { font-size: 0.75rem; color: var(--text-soft); margin-top: 0.2rem;}
+    .region-cb { display: none; }
+    .region-label { padding: 0.5rem 1rem; border: 1px solid var(--border); border-radius: 10px; font-size: 0.85rem; cursor: pointer; color: var(--text-soft); background: var(--modal-bg); transition: all 0.2s;}
+    .region-cb:checked + .region-label { background: var(--primary-light); color: var(--primary); border-color: var(--primary); font-weight: 700; box-shadow: 0 4px 6px -1px rgba(99, 102, 241, 0.1); }
+  </style>
+</head>
+<body>
+  <div id="auth-screen">
+    <div class="panel" style="width: 100%; max-width: 320px; text-align: center;">
+      <h3 style="margin-top:0">🔑 身份验证</h3>
+      <input type="password" id="auth-input" class="input-field" placeholder="请输入密码">
+      <button id="auth-btn" class="button button--primary" style="width: 100%;">进入控制台</button>
+    </div>
+  </div>
+  <main class="page" id="main-content" style="display: none;">
+    <div class="panel">
+      <div class="hero__title">
+        <span>🚀 Emby 数据大屏</span>
+        <div style="display:flex; gap:0.5rem;">
+          <button id="settings-btn" class="button button--secondary" style="padding:0.4rem; border-radius: 50%; width: 34px; height: 34px;">⚙️</button>
+          <button id="theme-toggle" class="button button--secondary" style="padding:0.4rem; border-radius: 50%; width: 34px; height: 34px;">🌓</button>
+        </div>
+      </div>
+      <div style="display: flex; gap: 0.5rem; margin-top: 0.8rem;">
+        <button id="btn-open-speedtest" class="button button--primary">⚡️ 测速中心</button>
+        <button id="stats-refresh" class="button button--secondary">🔄 刷新数据</button>
+      </div>
+    </div>
+    <div id="db-warning" style="display:none; background: #fee2e2; color: #ef4444; padding: 0.8rem; border-radius: 12px; font-size: 0.85rem; margin-bottom: 0.8rem; border: 1px solid #fca5a5;">⚠️ 数据库异常或未绑定。</div>
+    <div style="display:grid; grid-template-columns: 1fr 1fr; gap:0.8rem; margin-bottom:0.8rem">
+      <div class="panel" style="text-align:center; margin-bottom:0"><div class="stat-val" id="total-playing">0</div><div class="stat-label">总播放量</div></div>
+      <div class="panel" style="text-align:center; margin-bottom:0"><div class="stat-val" id="total-playback-info">0</div><div class="stat-label">获取链接</div></div>
+    </div>
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 0.8rem;">
+      <div class="panel"><div style="font-weight:700; font-size:0.9rem">📈 观影趋势</div><div class="chart-container"><canvas id="trendChart"></canvas></div></div>
+      <div class="panel"><div style="font-weight:700; font-size:0.9rem">📱 客户端深度分布</div><div class="chart-container"><canvas id="deviceChart"></canvas></div></div>
+    </div>
+    <div class="panel">
+      <div style="font-weight:700; font-size:0.9rem; margin-bottom:0.5rem">👥 活跃审计 (近10日)</div>
+      <div style="overflow-x: hidden;">
+        <table>
+          <thead><tr><th style="width: 35%;">IP地址</th><th style="width: 30%;">客户端 (解析)</th><th style="width: 15%;">时长</th><th style="width: 20%; text-align:right">操作</th></tr></thead>
+          <tbody id="user-stats-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </main>
+  <div id="settings-modal" class="modal" hidden>
+    <div class="modal-overlay" onclick="document.getElementById('settings-modal').hidden=true"></div>
+    <div class="modal-content">
+      <h3 style="margin:0 0 1rem 0">⚙️ 访问控制设置</h3>
+      <div style="font-size: 0.9rem; font-weight: 700; margin-bottom: 0.4rem;">🌍 允许访问的地区 (多选)</div>
+      <div style="font-size: 0.75rem; color: var(--text-soft); margin-bottom: 1.2rem;">不勾选任何地区即为“不限制”，允许全球访问。</div>
+      <div id="region-checkboxes" style="display: flex; flex-wrap: wrap; gap: 0.6rem; margin-bottom: 1.5rem;"></div>
+      <button id="save-settings-btn" class="button button--primary" style="width: 100%;">保存并生效</button>
+      <button onclick="document.getElementById('settings-modal').hidden=true" class="button button--secondary" style="width: 100%; margin-top: 0.5rem;">关闭</button>
+    </div>
+  </div>
+  <div id="speedtest-modal" class="modal" hidden>
+    <div class="modal-overlay" onclick="document.getElementById('speedtest-modal').hidden=true"></div>
+    <div class="modal-content">
+      <h3 style="margin:0 0 0.8rem 0">🛰️ 边缘网络诊断与历史</h3>
+      <div id="st-results">
+        <div class="st-item"><span>地理位置:</span><span id="st-loc" style="color:var(--primary); font-weight:700">正在定位...</span></div>
+        <div class="st-item"><span>运营商:</span><span id="st-isp" style="font-weight:700">--</span></div>
+        <div class="st-item"><span>延迟 (Ping):</span><span id="st-ping">--</span></div>
+      </div>
+      <div class="speed-number"><span id="live-speed">0.00</span><small style="font-size:1rem; margin-left:4px">Mbps</small></div>
+      <button id="st-start-btn" class="button button--primary" style="width: 100%; margin-top: 0.5rem; padding:0.8rem">开始实时测试</button>
+      <hr style="border:0; border-top:1px dashed var(--border); margin: 1.2rem 0 0.8rem 0;">
+      <div style="font-size:0.85rem; font-weight:700; margin-bottom:0.5rem">🕒 历史测速记录 (最近5次)</div>
+      <table style="font-size:0.75rem; margin-bottom:1rem; table-layout:auto;">
+        <thead><tr><th>时间</th><th>网络</th><th>延迟</th><th style="text-align:right">速率</th></tr></thead>
+        <tbody id="st-history-body"></tbody>
+      </table>
+      <button onclick="document.getElementById('speedtest-modal').hidden=true" class="button button--secondary" style="width: 100%;">关闭中心</button>
+    </div>
+  </div>
+
+  <script>
+    if ('serviceWorker' in navigator) { window.addEventListener('load', () => { navigator.serviceWorker.register('/sw.js').catch(()=>{}); }); }
+    let trendChart, deviceChart;
+    const setDark = (d) => { document.documentElement.classList.toggle('dark', d); localStorage.setItem('theme', d ? 'dark' : 'light'); };
+    setDark(localStorage.getItem('theme') === 'dark');
+    document.getElementById('theme-toggle').onclick = () => setDark(!document.documentElement.classList.contains('dark'));
+
+    let API_TOKEN = localStorage.getItem('emby-token') || '';
+    const checkAuth = async (token) => {
+      if(!token) return;
+      try {
+        const res = await fetch('/auth/verify', { headers: {'X-Api-Key': token} });
+        if (res.ok) { API_TOKEN = token; localStorage.setItem('emby-token', token); document.getElementById('auth-screen').style.display = 'none'; document.getElementById('main-content').style.display = 'block'; loadData(); } 
+        else { alert('面板密码不正确或后台环境配置异常'); }
+      } catch(e) { console.error("Auth Error", e); }
+    };
+    document.getElementById('auth-btn').onclick = () => checkAuth(document.getElementById('auth-input').value);
+    if(API_TOKEN) checkAuth(API_TOKEN);
+
+    const REGIONS = [{code: 'CN', name: '中国大陆'}, {code: 'HK', name: '香港'}, {code: 'TW', name: '台湾'}, {code: 'SG', name: '新加坡'}, {code: 'JP', name: '日本'}, {code: 'KR', name: '韩国'}, {code: 'US', name: '美国'}];
+    document.getElementById('region-checkboxes').innerHTML = REGIONS.map(r => '<label><input type="checkbox" class="region-cb" value="'+r.code+'"><div class="region-label">'+r.name+'</div></label>').join('');
+
+    document.getElementById('settings-btn').onclick = async () => {
+      document.getElementById('settings-modal').hidden = false;
+      try {
+        const res = await (await fetch('/api/config', { headers: {'X-Api-Key': API_TOKEN} })).json();
+        const allowed = res.data?.allowedRegions || [];
+        document.querySelectorAll('.region-cb').forEach(cb => { cb.checked = allowed.includes(cb.value); });
+      } catch(e) {}
+    };
+
+    document.getElementById('save-settings-btn').onclick = async () => {
+      const btn = document.getElementById('save-settings-btn'); btn.disabled = true; btn.textContent = '保存中...';
+      const selected = Array.from(document.querySelectorAll('.region-cb:checked')).map(cb => cb.value);
+      try {
+        const res = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Api-Key': API_TOKEN }, body: JSON.stringify({ allowedRegions: selected }) });
+        if (res.ok) { alert('✅ 地区限制策略已生效！'); document.getElementById('settings-modal').hidden = true; } else { alert('保存失败，请检查 D1 数据库。'); }
+      } catch(e) { alert('保存中断'); }
+      btn.disabled = false; btn.textContent = '保存并生效';
+    };
+
+    window.banIP = async (ip) => {
+      if(!confirm('⚠️ 确定要永久封禁 IP: ' + ip + ' 吗？\\n封禁后该用户将无法访问源站。')) return;
+      try {
+        const res = await fetch('/api/ban', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Api-Key': API_TOKEN }, body: JSON.stringify({ ip }) });
+        if(res.ok) { alert('✅ 封禁成功！'); loadData(); } else { alert('封禁失败，可能缺少数据库表'); }
+      } catch(e) { alert('请求出错'); }
+    };
+
+    const formatMaskedIP = (ip) => {
+      if (!ip) return '未知';
+      if (ip.includes(':')) { const parts = ip.split(':'); return parts.length > 2 ? parts[0] + ':..:' + parts[parts.length - 1] : ip; }
+      return ip.split('.').slice(0, 2).join('.') + '.*';
+    };
+
+    const formatTime = (ts) => {
+      try { const d = new Date(ts); return d.getMonth()+1 + '/' + d.getDate() + ' ' + String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0'); } 
+      catch(e) { return ts; }
+    };
+
+    async function loadData() {
+      try {
+        const res = await fetch('/stats', { headers: {'X-Api-Key': API_TOKEN} });
+        const payload = await res.json();
+        if (!payload.ok) { document.getElementById('db-warning').style.display = 'block'; document.getElementById('db-warning').innerText = '⚠️ 数据库异常: ' + (payload.error || '未知错误'); } 
+        else { document.getElementById('db-warning').style.display = 'none'; }
+
+        const d = payload.data || { dailyStats: [], userStats: [], clientStats: [], speedLogs: [], total: {playing: 0, playbackInfo: 0} };
+        
+        if (d.total) { document.getElementById('total-playing').textContent = d.total.playing || 0; document.getElementById('total-playback-info').textContent = d.total.playbackInfo || 0; }
+        
+        document.getElementById('user-stats-body').innerHTML = d.userStats.map(u => 
+          '<tr><td style="font-family:monospace; font-size:0.75rem; color:var(--primary);">' + formatMaskedIP(u.ip) + '</td><td style="font-size:0.8rem; word-break:break-all;">' + u.client_name + '</td><td style="font-size:0.8rem;">' + Math.round(u.duration_sec/60) + '分</td><td style="text-align:right"><button class="button" style="padding: 0.2rem 0.5rem; font-size: 0.7rem; border: 1px solid #fca5a5; color: #ef4444; background: transparent; white-space: nowrap;" onclick="banIP(\\''+u.ip+'\\')">封禁</button></td></tr>'
+        ).join('');
+        if(d.userStats.length === 0) document.getElementById('user-stats-body').innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--text-muted)">暂无数据记录</td></tr>';
+        
+        document.getElementById('st-history-body').innerHTML = d.speedLogs.map(s => 
+          '<tr><td style="color:var(--text-soft)">' + formatTime(s.created_at) + '</td><td>' + s.isp + '</td><td>' + s.ping + 'ms</td><td style="text-align:right; font-weight:700; color:var(--primary)">' + s.speed_mbps + ' M</td></tr>'
+        ).join('');
+        if(d.speedLogs.length === 0) document.getElementById('st-history-body').innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--text-muted)">暂无历史记录</td></tr>';
+
+        const commonOpt = { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } };
+        if(trendChart) trendChart.destroy();
+        trendChart = new Chart(document.getElementById('trendChart'), { type: 'line', data: { labels: d.dailyStats.map(s => s.date.slice(5)).reverse(), datasets: [{ data: d.dailyStats.map(s => s.playing_count).reverse(), borderColor: '#6366f1', fill: true, tension: 0.4 }] }, options: commonOpt });
+        if(deviceChart) deviceChart.destroy();
+        deviceChart = new Chart(document.getElementById('deviceChart'), { type: 'doughnut', data: { labels: d.clientStats.map(c => c.client_name), datasets: [{ data: d.clientStats.map(c => c.total_count), backgroundColor: ['#6366f1', '#10b981', '#f59e0b', '#ec4899', '#a855f7', '#0ea5e9', '#ef4444', '#8b5cf6', '#14b8a6'] }] }, options: { ...commonOpt, plugins: { legend: { display: true, position: 'right', labels: { boxWidth: 10, font: { size: 10 } } } } } });
+      } catch (e) { console.error("渲染失败", e); }
+    }
+    document.getElementById('stats-refresh').onclick = loadData;
+
+    const ispMap = { 'China Mobile': '中国移动', 'China Unicom': '中国联通', 'China Telecom': '中国电信', 'CMCC': '中国移动', 'UNICOM': '中国联通', 'CHINANET': '中国电信' };
+    document.getElementById('btn-open-speedtest').onclick = () => document.getElementById('speedtest-modal').hidden = false;
+    
+    document.getElementById('st-start-btn').onclick = async () => {
+      const btn = document.getElementById('st-start-btn');
+      const speedEl = document.getElementById('live-speed');
+      btn.disabled = true; btn.textContent = '卫星定位中...'; speedEl.textContent = '0.00';
+      
+      let finalLoc = '未知位置'; let finalIsp = '未知网络'; let pingVal = 0;
+
+      try {
+        await fetch('https://ipapi.co/json/').then(r => r.json()).then(geo => {
+          finalLoc = geo.region + ' ' + geo.city; document.getElementById('st-loc').textContent = finalLoc;
+          let rawIsp = geo.org || ''; for (let key in ispMap) { if(rawIsp.toUpperCase().includes(key.toUpperCase())) { finalIsp = ispMap[key]; break; } }
+          document.getElementById('st-isp').textContent = finalIsp;
+        }).catch(() => { document.getElementById('st-loc').textContent = '定位限流'; });
+
+        const pStart = performance.now();
+        await fetch('/trace', { method: 'HEAD', headers: {'X-Api-Key': API_TOKEN}, cache: 'no-store' });
+        pingVal = Math.round(performance.now() - pStart);
+        document.getElementById('st-ping').textContent = pingVal + ' ms';
+
+        btn.textContent = '全速下行测速中...';
+        const response = await fetch('/speedtest', { headers: {'X-Api-Key': API_TOKEN} });
+        const reader = response.body.getReader();
+        let receivedLength = 0, startTime = performance.now();
+
+        while(true) {
+          const {done, value} = await reader.read();
+          if (done) break;
+          receivedLength += value.length;
+          const duration = (performance.now() - startTime) / 1000;
+          if (duration > 0.1) speedEl.textContent = ((receivedLength * 8) / (1024 * 1024) / duration).toFixed(2);
+        }
+        
+        const finalSpeed = parseFloat(speedEl.textContent);
+        fetch('/api/speedlog', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Api-Key': API_TOKEN }, body: JSON.stringify({ loc: finalLoc, isp: finalIsp, ping: pingVal, speed_mbps: finalSpeed }) }).then(() => loadData());
+        btn.textContent = '重新测试';
+      } catch(e) { alert('测速连接中断'); }
+      btn.disabled = false;
+    };
+  </script>
+</body>
+</html>
+`;
 
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+
+    // =====================================
+    // 🔐 安全获取环境变量 (提供缺省兜底)
+    // =====================================
+    // 请确保你在 CF 后台设置了这俩变量，如果没有，使用这里写死的缺省值
+    const TARGET_SERVER_URL = env.TARGET_EMBY_SERVER;
+    const DASHBOARD_PASSWORD = env.PANEL_PASSWORD;
+
+    if (url.pathname === '/icon.png') {
+      const icon = await fetch('https://raw.githubusercontent.com/google/material-design-icons/master/png/device/wallpaper/materialicons/48dp/1x/baseline_wallpaper_black_48dp.png');
+      return new Response(icon.body, { headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=604800' } });
+    }
+    if (url.pathname === '/manifest.json') {
+      return new Response(JSON.stringify({ name: "Emby 大屏", short_name: "EmbyDash", start_url: "/dash", display: "standalone", background_color: "#f8fafc", theme_color: "#6366f1", icons: [{ src: "/icon.png", sizes: "48x48", type: "image/png" }] }), { headers: { 'Content-Type': 'application/json' } });
+    }
+    if (url.pathname === '/sw.js') return new Response("self.addEventListener('fetch',()=>{})", { headers: { 'Content-Type': 'application/javascript' } });
+
+    // =====================================
+    // 🛑 黑名单与地区拦截中间件
+    // =====================================
     const config = await syncConfig(env);
-    const TARGET = env.TARGET_EMBY_SERVER;
-    const PWD = env.PANEL_PASSWORD || 'emby';
-    const clientIp = request.headers.get('cf-connecting-ip') || '127.0.0.1';
-    const cf = request.cf || {};
+    const clientIp = request.headers.get('cf-connecting-ip') || '未知 IP';
+    const countryCode = request.cf?.country || 'XX';
+    const city = request.cf?.city || '';
+    const colo = request.cf?.colo || 'N/A';
 
-    if (!TARGET) return new Response('⚠️ Worker 错误：请在后台配置 TARGET_EMBY_SERVER 变量', { status: 500 });
-
-    // 1. 严格拦截网关
-    const isControlPath = url.pathname === '/dash' || url.pathname.startsWith('/api') || url.pathname === '/stats' || url.pathname === '/speedtest' || url.pathname === '/auth/verify';
-    if (!isControlPath) {
-      if (config.blacklist.includes(clientIp)) {
-        return new Response(getBlockedHTML(clientIp, cf, 'banned'), { status: 403, headers: {'Content-Type': 'text/html;charset=utf-8'}});
-      }
-      if (config.allowedRegions.length > 0 && cf.country && !config.allowedRegions.includes(cf.country)) {
-        return new Response(getBlockedHTML(clientIp, cf, 'region'), { status: 403, headers: {'Content-Type': 'text/html;charset=utf-8'}});
-      }
+    if (url.pathname !== '/dash' && !url.pathname.startsWith('/api')) {
+        if (config.blacklist.includes(clientIp)) {
+          return new Response(getBlockedHTML(clientIp, countryCode, city, colo, 'banned'), { status: 403, headers: { 'Content-Type': 'text/html; charset=utf-8' }});
+        }
+        if (config.allowedRegions.length > 0 && countryCode !== 'XX' && !config.allowedRegions.includes(countryCode)) {
+          return new Response(getBlockedHTML(clientIp, countryCode, city, colo, 'region'), { status: 403, headers: { 'Content-Type': 'text/html; charset=utf-8' }});
+        }
     }
 
-    // 2. 路由处理
-    if (url.pathname === '/dash') return new Response(FRONTEND_HTML, { headers: {'Content-Type': 'text/html;charset=utf-8'}});
+    const authKey = request.headers.get('X-Api-Key');
+    const isApi = ['/stats', '/trace', '/speedtest', '/auth/verify', '/api/config', '/api/ban', '/api/speedlog'].includes(url.pathname);
+    if (isApi) {
+      if (authKey !== DASHBOARD_PASSWORD) return new Response(JSON.stringify({ok:false, error:'Unauthorized'}), { status: 401 });
+      if (url.pathname === '/auth/verify') return new Response(JSON.stringify({ok:true}), { status: 200 });
+    }
+
+    // 💡 大屏暗门：仅通过 /dash 访问
+    if (url.pathname === '/dash') return new Response(FRONTEND_HTML, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
     
-    if (isControlPath) {
-      if (request.headers.get('X-Api-Key') !== PWD) return new Response(JSON.stringify({ok:false, error:'Unauthorized'}), { status: 401 });
-      if (url.pathname === '/stats') return handleStatsRequest(env);
-      if (url.pathname === '/auth/verify') return new Response(JSON.stringify({ok:true}));
-      if (url.pathname === '/speedtest') return new Response(new ReadableStream({start(c){for(let i=0;i<15;i++)c.enqueue(SPEEDTEST_CHUNK);c.close();}}));
-      
-      // 处理配置更新
+    // API 路由
+    if (url.pathname === '/stats') return handleStatsRequest(env);
+    if (url.pathname === '/trace') return new Response(JSON.stringify({ ip: clientIp, colo: colo }), { headers: { 'Cache-Control': 'no-store' } });
+    if (url.pathname === '/speedtest') return new Response(new ReadableStream({ start(c) { for(let i=0; i<15; i++) c.enqueue(SPEEDTEST_CHUNK); c.close(); } }), { headers: { 'Content-Type': 'application/octet-stream' } });
+    
+    if (url.pathname === '/api/speedlog' && request.method === 'POST') {
+      try {
+        const body = await request.json(); if (!env.DB) throw new Error("未绑定数据库"); const now = new Date().toISOString();
+        await env.DB.prepare("CREATE TABLE IF NOT EXISTS auto_emby_speed_log (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT, ip TEXT, loc TEXT, isp TEXT, ping INTEGER, speed_mbps REAL)").run();
+        await env.DB.prepare("INSERT INTO auto_emby_speed_log (created_at, ip, loc, isp, ping, speed_mbps) VALUES (?, ?, ?, ?, ?, ?)").bind(now, clientIp, body.loc, body.isp, body.ping, body.speed_mbps).run();
+        return new Response(JSON.stringify({ok: true}));
+      } catch(e) { return new Response(JSON.stringify({ok: false, error: e.message}), {status: 500}); }
+    }
+
+    if (url.pathname === '/api/config') {
+      if (request.method === 'GET') return new Response(JSON.stringify({ok: true, data: { allowedRegions: config.allowedRegions }}));
       if (request.method === 'POST') {
-        const body = await request.json();
-        if (url.pathname === '/api/config') {
-          const val = JSON.stringify(body.allowedRegions);
-          await env.DB.prepare("INSERT INTO auto_emby_config (key, value) VALUES ('allowed_regions', ?) ON CONFLICT(key) DO UPDATE SET value = ?").bind(val, val).run();
-          CACHED_CONFIG.expire = 0;
-          return new Response(JSON.stringify({ok:true}));
-        }
-        if (url.pathname === '/api/ban') {
-          await env.DB.prepare("INSERT INTO auto_emby_blacklist (ip, created_at) VALUES (?, ?)").bind(body.ip, new Date().toISOString()).run();
-          CACHED_CONFIG.expire = 0;
-          return new Response(JSON.stringify({ok:true}));
-        }
+        try {
+          const body = await request.json(); if (!env.DB) throw new Error("未绑定数据库");
+          await env.DB.prepare("CREATE TABLE IF NOT EXISTS auto_emby_config (key TEXT PRIMARY KEY, value TEXT)").run();
+          const regionsJSON = JSON.stringify(body.allowedRegions || []);
+          await env.DB.prepare("INSERT INTO auto_emby_config (key, value) VALUES ('allowed_regions', ?) ON CONFLICT(key) DO UPDATE SET value = ?").bind(regionsJSON, regionsJSON).run();
+          CACHED_CONFIG.allowedRegions = body.allowedRegions; CACHED_CONFIG.expire = 0; 
+          return new Response(JSON.stringify({ok: true}));
+        } catch(e) { return new Response(JSON.stringify({ok: false, error: e.message}), {status: 500}); }
       }
     }
 
-    // 3. 全透明代理转发
-    let dest = new URL(request.url);
-    const t = new URL(TARGET);
-    dest.protocol = t.protocol; dest.hostname = t.hostname; dest.port = t.port;
-    
-    const options = { method: request.method, headers: new Headers(request.headers), redirect: 'manual' };
-    if (request.method !== 'GET' && request.method !== 'HEAD') options.body = request.body;
-    options.headers.set('Host', dest.host);
-    
-    // 自动记录统计（不影响主流程）
-    if (dest.pathname.includes('/Playing/Progress')) ctx.waitUntil(recordAudit(env, clientIp, "EmbyPlayer", 10));
+    if (url.pathname === '/api/ban' && request.method === 'POST') {
+      try {
+        const body = await request.json(); if (!env.DB) throw new Error("未绑定数据库");
+        await env.DB.prepare("CREATE TABLE IF NOT EXISTS auto_emby_blacklist (ip TEXT PRIMARY KEY, created_at TEXT)").run();
+        await env.DB.prepare("INSERT INTO auto_emby_blacklist (ip, created_at) VALUES (?, ?) ON CONFLICT(ip) DO NOTHING").bind(body.ip, new Date().toISOString()).run();
+        CACHED_CONFIG.blacklist.push(body.ip); CACHED_CONFIG.expire = 0; 
+        return new Response(JSON.stringify({ok: true}));
+      } catch(e) { return new Response(JSON.stringify({ok: false, error: e.message}), {status: 500}); }
+    }
 
-    return fetch(dest.toString(), options);
+    // =====================================
+    // 🎬 核心：纯净专线直连
+    // =====================================
+    let upstream = new URL(request.url);
+    try {
+      const targetURL = new URL(TARGET_SERVER_URL);
+      upstream.protocol = targetURL.protocol;
+      upstream.hostname = targetURL.hostname;
+      upstream.port = targetURL.port;
+    } catch {
+      return new Response('Invalid TARGET_EMBY_SERVER Env Variable', { status: 500 });
+    }
+
+    let rawClientName = request.headers.get('X-Emby-Client') || '';
+    const userAgent = request.headers.get('User-Agent') || '';
+    let clientName = rawClientName;
+
+    if (!clientName || clientName === 'Web Browser' || clientName === 'Device' || clientName === '未知设备') {
+      if (userAgent.includes('VidHub')) clientName = 'VidHub 客户端';
+      else if (userAgent.includes('Popcorn') || userAgent.includes('爆米花')) clientName = '网易爆米花';
+      else if (userAgent.includes('Infuse')) clientName = 'Infuse 客户端';
+      else if (userAgent.includes('Fileball')) clientName = 'Fileball';
+      else if (userAgent.includes('MicroMessenger')) clientName = '微信内置浏览器';
+      else if (userAgent.includes('Edg/')) clientName = 'Edge 浏览器';
+      else if (userAgent.includes('Chrome/')) clientName = 'Chrome 浏览器';
+      else if (userAgent.includes('Safari/') && !userAgent.includes('Chrome/')) clientName = 'Safari (iPhone/Mac)';
+      else if (userAgent.includes('Firefox/')) clientName = 'Firefox 浏览器';
+      else if (userAgent.includes('iPhone')) clientName = 'iPhone (iOS)';
+      else if (userAgent.includes('iPad')) clientName = 'iPad (iOS)';
+      else if (userAgent.includes('Android')) clientName = 'Android 设备';
+      else if (userAgent.includes('Macintosh')) clientName = 'Mac 客户端';
+      else if (userAgent.includes('Windows')) clientName = 'Windows 客户端';
+      else clientName = rawClientName || '未知来源';
+    }
+
+    if (upstream.pathname.includes('/Playing/Progress')) ctx.waitUntil(recordUserAudit(env, clientIp, clientName, 10));
+    if (upstream.pathname.endsWith('/Sessions/Playing') || upstream.pathname.includes('/PlaybackInfo')) ctx.waitUntil(recordBasicStats(env, upstream.pathname.endsWith('/Sessions/Playing') ? 'playing' : 'playback', clientName));
+
+    // 🚀 终极修复：POST 数据完美透传！
+    const options = { 
+        method: request.method, 
+        headers: new Headers(request.headers),
+        redirect: 'manual' 
+    };
+    if (request.method !== 'GET' && request.method !== 'HEAD') {
+        options.body = request.body;
+    }
+
+    options.headers.set('Host', upstream.host);
+    
+    // 首屏加速与透传优化
+    if (/\.(jpeg|jpg|png|gif|css|js|woff2|woff|ttf)$/i.test(upstream.pathname)) {
+      options.cf = { cacheTtl: 7200, cacheEverything: true };
+    } else if (/\.(mp4|mkv|ts|webm|m3u8|flv|aac|mp3)$/i.test(upstream.pathname) || upstream.pathname.includes('/stream') || upstream.pathname.includes('/PlaybackInfo')) {
+      options.cf = { cacheTtl: 0, cacheEverything: false }; 
+      options.headers.set('Connection', 'keep-alive');      
+      options.headers.delete('Accept-Encoding');          
+    }
+
+    return fetch(upstream.toString(), options);
   }
 };
 
-// --- 🗄️ 数据库操作函数集 ---
-async function recordAudit(env, ip, client, sec) {
+// =====================================
+// 🗄️ 数据库操作层
+// =====================================
+async function recordBasicStats(env, type, client) {
   if (!env.DB) return;
-  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' });
-  await env.DB.prepare("INSERT INTO auto_emby_user_stats (date, ip, client_name, duration_sec) VALUES (?, ?, ?, ?) ON CONFLICT(date, ip, client_name) DO UPDATE SET duration_sec = duration_sec + ?").bind(today, ip, client, sec, sec).run();
+  try {
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' });
+    const col = type === 'playing' ? 'playing_count' : 'playback_info_count';
+    const sql = "INSERT INTO auto_emby_daily_stats (date, " + col + ") VALUES (?, 1) ON CONFLICT(date) DO UPDATE SET " + col + " = " + col + " + 1";
+    await env.DB.prepare(sql).bind(today).run();
+    await env.DB.prepare("INSERT INTO auto_emby_client_stats (date, client_name, count) VALUES (?, ?, 1) ON CONFLICT(date, client_name) DO UPDATE SET count = count + 1").bind(today, client).run();
+  } catch (e) {}
+}
+
+async function recordUserAudit(env, ip, client, sec) {
+  if (!env.DB) return;
+  try {
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' });
+    await env.DB.prepare("INSERT INTO auto_emby_user_stats (date, ip, client_name, duration_sec) VALUES (?, ?, ?, ?) ON CONFLICT(date, ip, client_name) DO UPDATE SET duration_sec = duration_sec + ?").bind(today, ip, client, sec, sec).run();
+  } catch (e) {}
 }
 
 async function handleStatsRequest(env) {
+  if (!env.DB) return new Response(JSON.stringify({ok: false, enabled: false, error: "未绑定D1数据库"}));
   try {
     const batch = await env.DB.batch([
-      env.DB.prepare("SELECT date, playing_count FROM auto_emby_daily_stats ORDER BY date DESC LIMIT 14"),
-      env.DB.prepare("SELECT ip, client_name, duration_sec FROM auto_emby_user_stats ORDER BY duration_sec DESC LIMIT 15"),
-      env.DB.prepare("SELECT client_name, SUM(count) as total_count FROM auto_emby_client_stats GROUP BY client_name LIMIT 5"),
+      env.DB.prepare("SELECT date, playing_count FROM auto_emby_daily_stats ORDER BY date DESC LIMIT 10"),
+      env.DB.prepare("SELECT ip, client_name, SUM(duration_sec) as duration_sec FROM auto_emby_user_stats GROUP BY ip, client_name ORDER BY duration_sec DESC LIMIT 10"),
+      env.DB.prepare("SELECT client_name, SUM(count) as total_count FROM auto_emby_client_stats GROUP BY client_name ORDER BY total_count DESC LIMIT 8"),
       env.DB.prepare("SELECT COALESCE(SUM(playing_count),0) as playing, COALESCE(SUM(playback_info_count),0) as playbackInfo FROM auto_emby_daily_stats"),
-      env.DB.prepare("SELECT loc, isp, ping, speed_mbps FROM auto_emby_speed_log ORDER BY id DESC LIMIT 5")
+      env.DB.prepare("SELECT created_at, loc, isp, ping, speed_mbps FROM auto_emby_speed_log ORDER BY id DESC LIMIT 5")
     ]);
-    return new Response(JSON.stringify({
-      ok: true,
-      data: {
-        dailyStats: batch[0].results,
-        userStats: batch[1].results,
-        clientStats: batch[2].results,
-        total: batch[3].results[0],
-        speedLogs: batch[4].results
-      }
+    return new Response(JSON.stringify({ 
+      ok: true, enabled: true, 
+      data: { 
+        dailyStats: batch[0].results, userStats: batch[1].results, clientStats: batch[2].results, 
+        total: batch[3].results[0], speedLogs: batch[4].results ? batch[4].results : []
+      } 
     }));
-  } catch (e) { return new Response(JSON.stringify({ ok: false, error: e.message })); }
+  } catch (e) {
+    return new Response(JSON.stringify({ ok: false, enabled: true, error: e.message, data: { dailyStats: [], userStats: [], clientStats: [], speedLogs: [], total: {playing: 0, playbackInfo: 0} } }));
+  }
 }
