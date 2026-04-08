@@ -1,13 +1,13 @@
 /**
  * =================================================================================
- * Cloudflare Worker Emby 终极版 v6.0 (纯净专线直连 + 登录数据透传修复 + 隐形大屏)
+ * Cloudflare Worker Emby 终极安全版 v7.0 (纯净专线直连 + 环境变量解耦防泄漏)
  * =================================================================================
+ * ⚠️ 警告：不要在此代码中写死任何密码或服务器地址！
+ * 请前往 Cloudflare -> Settings -> Variables and Secrets 设置以下环境变量：
+ * 1. TARGET_EMBY_SERVER (你的 Emby 源站带端口地址)
+ * 2. PANEL_PASSWORD (加密机密 - 大屏后台密码)
  */
 
-// ⚠️ 核心配置区：在这里写死你朋友的源站地址
-const TARGET_EMBY_SERVER = 'https://link00.okemby.org:8443'; 
-
-const PANEL_PASSWORD = 'emby'; // 控制台访问密码
 const SPEEDTEST_CHUNK = new Uint8Array(1024 * 1024);
 
 // =====================================
@@ -146,7 +146,7 @@ const FRONTEND_HTML = `
         <button id="stats-refresh" class="button button--secondary">🔄 刷新数据</button>
       </div>
     </div>
-    <div id="db-warning" style="display:none; background: #fee2e2; color: #ef4444; padding: 0.8rem; border-radius: 12px; font-size: 0.85rem; margin-bottom: 0.8rem; border: 1px solid #fca5a5;">⚠️ 数据库异常或缺失统计表，请确认已绑定 D1 数据库。</div>
+    <div id="db-warning" style="display:none; background: #fee2e2; color: #ef4444; padding: 0.8rem; border-radius: 12px; font-size: 0.85rem; margin-bottom: 0.8rem; border: 1px solid #fca5a5;">⚠️ 数据库异常或未绑定。</div>
     <div style="display:grid; grid-template-columns: 1fr 1fr; gap:0.8rem; margin-bottom:0.8rem">
       <div class="panel" style="text-align:center; margin-bottom:0"><div class="stat-val" id="total-playing">0</div><div class="stat-label">总播放量</div></div>
       <div class="panel" style="text-align:center; margin-bottom:0"><div class="stat-val" id="total-playback-info">0</div><div class="stat-label">获取链接</div></div>
@@ -210,7 +210,7 @@ const FRONTEND_HTML = `
       try {
         const res = await fetch('/auth/verify', { headers: {'X-Api-Key': token} });
         if (res.ok) { API_TOKEN = token; localStorage.setItem('emby-token', token); document.getElementById('auth-screen').style.display = 'none'; document.getElementById('main-content').style.display = 'block'; loadData(); } 
-        else { alert('面板密码不正确'); }
+        else { alert('面板密码不正确或后台环境配置异常'); }
       } catch(e) { console.error("Auth Error", e); }
     };
     document.getElementById('auth-btn').onclick = () => checkAuth(document.getElementById('auth-input').value);
@@ -337,6 +337,13 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
+    // =====================================
+    // 🔐 安全获取环境变量 (提供缺省兜底)
+    // =====================================
+    // 请确保你在 CF 后台设置了这俩变量，如果没有，使用这里写死的缺省值
+    const TARGET_SERVER_URL = env.TARGET_EMBY_SERVER;
+    const DASHBOARD_PASSWORD = env.PANEL_PASSWORD;
+
     if (url.pathname === '/icon.png') {
       const icon = await fetch('https://raw.githubusercontent.com/google/material-design-icons/master/png/device/wallpaper/materialicons/48dp/1x/baseline_wallpaper_black_48dp.png');
       return new Response(icon.body, { headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=604800' } });
@@ -355,7 +362,6 @@ export default {
     const city = request.cf?.city || '';
     const colo = request.cf?.colo || 'N/A';
 
-    // 💡 放行 /dash 路径，防止自己被黑名单或地理围栏挡住进不去后台
     if (url.pathname !== '/dash' && !url.pathname.startsWith('/api')) {
         if (config.blacklist.includes(clientIp)) {
           return new Response(getBlockedHTML(clientIp, countryCode, city, colo, 'banned'), { status: 403, headers: { 'Content-Type': 'text/html; charset=utf-8' }});
@@ -368,7 +374,7 @@ export default {
     const authKey = request.headers.get('X-Api-Key');
     const isApi = ['/stats', '/trace', '/speedtest', '/auth/verify', '/api/config', '/api/ban', '/api/speedlog'].includes(url.pathname);
     if (isApi) {
-      if (authKey !== PANEL_PASSWORD) return new Response(JSON.stringify({ok:false, error:'Unauthorized'}), { status: 401 });
+      if (authKey !== DASHBOARD_PASSWORD) return new Response(JSON.stringify({ok:false, error:'Unauthorized'}), { status: 401 });
       if (url.pathname === '/auth/verify') return new Response(JSON.stringify({ok:true}), { status: 200 });
     }
 
@@ -414,17 +420,16 @@ export default {
     }
 
     // =====================================
-    // 🎬 Emby 核心：纯净的专线代理逻辑 (硬编码目标服务器)
+    // 🎬 核心：纯净专线直连
     // =====================================
     let upstream = new URL(request.url);
     try {
-      const targetURL = new URL(TARGET_EMBY_SERVER);
+      const targetURL = new URL(TARGET_SERVER_URL);
       upstream.protocol = targetURL.protocol;
       upstream.hostname = targetURL.hostname;
       upstream.port = targetURL.port;
-      // 注意：upstream.pathname (如 /emby/System/Info) 原封不动透传！
     } catch {
-      return new Response('Invalid TARGET_EMBY_SERVER URL configured in Worker.', { status: 500 });
+      return new Response('Invalid TARGET_EMBY_SERVER Env Variable', { status: 500 });
     }
 
     let rawClientName = request.headers.get('X-Emby-Client') || '';
@@ -452,7 +457,7 @@ export default {
     if (upstream.pathname.includes('/Playing/Progress')) ctx.waitUntil(recordUserAudit(env, clientIp, clientName, 10));
     if (upstream.pathname.endsWith('/Sessions/Playing') || upstream.pathname.includes('/PlaybackInfo')) ctx.waitUntil(recordBasicStats(env, upstream.pathname.endsWith('/Sessions/Playing') ? 'playing' : 'playback', clientName));
 
-    // 🚀 终极修复：确保非 GET 请求的 Body 被完美透传！
+    // 🚀 终极修复：POST 数据完美透传！
     const options = { 
         method: request.method, 
         headers: new Headers(request.headers),
