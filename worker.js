@@ -1,6 +1,6 @@
 /**
  * =================================================================================
- * Cloudflare Worker Emby 终极版 (一键封禁 + 修复移动端溢出 + 极致间距)
+ * Cloudflare Worker Emby 终极版 (一键封禁 + 修复 IPv6 移动端溢出)
  * =================================================================================
  */
 
@@ -32,7 +32,7 @@ async function syncConfig(env) {
 }
 
 // =====================================
-// 🛑 动态拦截页 HTML 模板 (已修复移动端溢出)
+// 🛑 动态拦截页 HTML 模板
 // =====================================
 function getBlockedHTML(ip, countryCode, city, colo, reason = 'region') {
   const countryMap = { 'CN': '中国大陆', 'HK': '中国香港', 'TW': '中国台湾', 'SG': '新加坡', 'JP': '日本', 'KR': '韩国', 'US': '美国', 'GB': '英国' };
@@ -53,7 +53,6 @@ function getBlockedHTML(ip, countryCode, city, colo, reason = 'region') {
   <style>
     :root { --bg-color: #f8fafc; --panel-bg: rgba(255, 255, 255, 0.9); --text-main: #0f172a; --border: rgba(226, 232, 240, 0.8); }
     @media (prefers-color-scheme: dark) { :root { --bg-color: #0f172a; --panel-bg: rgba(30, 41, 59, 0.85); --text-main: #f8fafc; --border: rgba(51, 65, 85, 0.8); } }
-    /* 修复横向滚动的核心：全局 box-sizing 和禁止 body 横向溢出 */
     * { box-sizing: border-box; }
     body { margin: 0; font-family: -apple-system, sans-serif; background-color: var(--bg-color); color: var(--text-main); min-height: 100vh; display: flex; align-items: center; overflow-x: hidden; }
     .page { padding: 1rem; width: 100%; max-width: 420px; margin: 0 auto; }
@@ -66,7 +65,6 @@ function getBlockedHTML(ip, countryCode, city, colo, reason = 'region') {
     .info-item { display: flex; justify-content: space-between; align-items: flex-start; font-size: 0.85rem; padding: 0.4rem 0; border-bottom: 1px dashed var(--border); gap: 1rem; }
     .info-item:last-child { border-bottom: none; padding-bottom: 0; }
     .info-label { color: #64748b; white-space: nowrap; flex-shrink: 0; }
-    /* 修复超长 IP (如 IPv6) 撑爆容器 */
     .info-val { font-weight: 700; color: #6366f1; font-family: monospace; word-break: break-all; text-align: right; }
   </style>
 </head>
@@ -128,8 +126,9 @@ const FRONTEND_HTML = `
     .button--secondary { background: transparent; color: var(--text-main); border: 1px solid var(--border); }
     .chart-container { position: relative; height: 160px; width: 100%; }
     
-    table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
-    th, td { padding: 0.5rem; border-bottom: 1px solid var(--border); text-align: left; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; table-layout: fixed; }
+    th, td { padding: 0.5rem 0.2rem; border-bottom: 1px solid var(--border); text-align: left; vertical-align: middle; word-wrap: break-word; }
+    th { color: var(--text-soft); font-weight: 600; font-size: 0.75rem; }
     
     #auth-screen { position: fixed; inset: 0; z-index: 9999; background: var(--bg-color); display: flex; align-items: center; justify-content: center; padding: 1rem;}
     .input-field { width: 100%; padding: 0.8rem; border-radius: 10px; border: 2px solid var(--border); background: var(--modal-bg); color: var(--text-main); margin-bottom: 1rem; outline: none;}
@@ -190,9 +189,16 @@ const FRONTEND_HTML = `
 
     <div class="panel">
       <div style="font-weight:700; font-size:0.9rem; margin-bottom:0.5rem">👥 活跃审计 (近10日)</div>
-      <div style="overflow-x: auto;">
+      <div style="overflow-x: hidden;">
         <table>
-          <thead><tr><th>IP地址</th><th>客户端</th><th>时长</th><th style="text-align:right">操作</th></tr></thead>
+          <thead>
+            <tr>
+              <th style="width: 35%;">IP地址</th>
+              <th style="width: 30%;">客户端</th>
+              <th style="width: 15%;">时长</th>
+              <th style="width: 20%; text-align:right">操作</th>
+            </tr>
+          </thead>
           <tbody id="user-stats-body"></tbody>
         </table>
       </div>
@@ -274,14 +280,23 @@ const FRONTEND_HTML = `
       btn.disabled = false; btn.textContent = '保存并生效';
     };
 
-    // 💡 新增：一键封禁 IP 逻辑
     window.banIP = async (ip) => {
-      if(!confirm(\`⚠️ 确定要永久封禁 IP: \${ip} 吗？\n封禁后该用户将无法访问源站。\`)) return;
+      if(!confirm('⚠️ 确定要永久封禁 IP: ' + ip + ' 吗？\\n封禁后该用户将无法访问源站。')) return;
       try {
         const res = await fetch('/api/ban', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Api-Key': API_TOKEN }, body: JSON.stringify({ ip }) });
         if(res.ok) { alert('✅ 封禁成功！'); loadData(); } 
         else { alert('封禁失败，可能缺少数据库表'); }
       } catch(e) { alert('请求出错'); }
+    };
+
+    // 🧠 核心修复：IPv6 和 IPv4 智能截断掩码，防止移动端表格爆炸
+    const formatMaskedIP = (ip) => {
+      if (!ip) return '未知';
+      if (ip.includes(':')) {
+        const parts = ip.split(':');
+        return parts.length > 2 ? parts[0] + ':..:' + parts[parts.length - 1] : ip;
+      }
+      return ip.split('.').slice(0, 2).join('.') + '.*';
     };
 
     async function loadData() {
@@ -297,10 +312,13 @@ const FRONTEND_HTML = `
           document.getElementById('total-playback-info').textContent = d.total.playbackInfo || 0;
         }
         
-        // 渲染表格，加入红色的封禁按钮 (注入真实的 IP 到 onclick)
         document.getElementById('user-stats-body').innerHTML = d.userStats.map(u => 
-          '<tr><td>' + u.ip.split('.').slice(0,2).join('.') + '.*</td><td>' + u.client_name + '</td><td>' + Math.round(u.duration_sec/60) + '分</td>' + 
-          '<td style="text-align:right"><button class="button" style="padding: 0.2rem 0.6rem; font-size: 0.75rem; border: 1px solid #fca5a5; color: #ef4444; background: transparent;" onclick="banIP(\\''+u.ip+'\\')">封禁</button></td></tr>'
+          '<tr>' +
+          '<td style="font-family:monospace; font-size:0.75rem; color:var(--primary);">' + formatMaskedIP(u.ip) + '</td>' +
+          '<td style="font-size:0.8rem; word-break:break-all;">' + u.client_name + '</td>' +
+          '<td style="font-size:0.8rem;">' + Math.round(u.duration_sec/60) + '分</td>' + 
+          '<td style="text-align:right"><button class="button" style="padding: 0.2rem 0.5rem; font-size: 0.7rem; border: 1px solid #fca5a5; color: #ef4444; background: transparent; white-space: nowrap;" onclick="banIP(\\''+u.ip+'\\')">封禁</button></td>' +
+          '</tr>'
         ).join('');
         
         if(d.userStats.length === 0) document.getElementById('user-stats-body').innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--text-muted)">暂无数据记录</td></tr>';
@@ -377,19 +395,14 @@ export default {
     const city = request.cf?.city || '';
     const colo = request.cf?.colo || 'N/A';
 
-    // 1. 优先查杀黑名单 (直接永久封禁)
     if (config.blacklist.includes(clientIp)) {
       return new Response(getBlockedHTML(clientIp, countryCode, city, colo, 'banned'), { status: 403, headers: { 'Content-Type': 'text/html; charset=utf-8' }});
     }
 
-    // 2. 检查地区围栏
     if (config.allowedRegions.length > 0 && countryCode !== 'XX' && !config.allowedRegions.includes(countryCode)) {
       return new Response(getBlockedHTML(clientIp, countryCode, city, colo, 'region'), { status: 403, headers: { 'Content-Type': 'text/html; charset=utf-8' }});
     }
 
-    // =====================================
-    // 🔑 API 鉴权校验
-    // =====================================
     const authKey = request.headers.get('X-Api-Key');
     const isApi = ['/stats', '/trace', '/speedtest', '/auth/verify', '/api/config', '/api/ban'].includes(url.pathname);
     if (isApi) {
@@ -397,15 +410,11 @@ export default {
       if (url.pathname === '/auth/verify') return new Response(JSON.stringify({ok:true}), { status: 200 });
     }
 
-    // =====================================
-    // ⚙️ 业务与控制台 API 路由
-    // =====================================
     if (url.pathname === '/') return new Response(FRONTEND_HTML, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
     if (url.pathname === '/stats') return handleStatsRequest(env);
     if (url.pathname === '/trace') return new Response(JSON.stringify({ ip: clientIp, colo: colo }), { headers: { 'Cache-Control': 'no-store' } });
     if (url.pathname === '/speedtest') return new Response(new ReadableStream({ start(c) { for(let i=0; i<15; i++) c.enqueue(SPEEDTEST_CHUNK); c.close(); } }), { headers: { 'Content-Type': 'application/octet-stream' } });
     
-    // 配置地区
     if (url.pathname === '/api/config') {
       if (request.method === 'GET') return new Response(JSON.stringify({ok: true, data: { allowedRegions: config.allowedRegions }}));
       if (request.method === 'POST') {
@@ -415,28 +424,23 @@ export default {
           await env.DB.prepare("CREATE TABLE IF NOT EXISTS auto_emby_config (key TEXT PRIMARY KEY, value TEXT)").run();
           const regionsJSON = JSON.stringify(body.allowedRegions || []);
           await env.DB.prepare("INSERT INTO auto_emby_config (key, value) VALUES ('allowed_regions', ?) ON CONFLICT(key) DO UPDATE SET value = ?").bind(regionsJSON, regionsJSON).run();
-          CACHED_CONFIG.allowedRegions = body.allowedRegions; CACHED_CONFIG.expire = 0; // 强制刷新缓存
+          CACHED_CONFIG.allowedRegions = body.allowedRegions; CACHED_CONFIG.expire = 0; 
           return new Response(JSON.stringify({ok: true}));
         } catch(e) { return new Response(JSON.stringify({ok: false, error: e.message}), {status: 500}); }
       }
     }
 
-    // 封禁 IP 接口
     if (url.pathname === '/api/ban' && request.method === 'POST') {
       try {
         const body = await request.json();
         if (!env.DB) throw new Error("未绑定数据库");
         await env.DB.prepare("CREATE TABLE IF NOT EXISTS auto_emby_blacklist (ip TEXT PRIMARY KEY, created_at TEXT)").run();
-        // 插入黑名单库
         await env.DB.prepare("INSERT INTO auto_emby_blacklist (ip, created_at) VALUES (?, ?) ON CONFLICT(ip) DO NOTHING").bind(body.ip, new Date().toISOString()).run();
-        CACHED_CONFIG.blacklist.push(body.ip); CACHED_CONFIG.expire = 0; // 强制刷新缓存
+        CACHED_CONFIG.blacklist.push(body.ip); CACHED_CONFIG.expire = 0; 
         return new Response(JSON.stringify({ok: true}));
       } catch(e) { return new Response(JSON.stringify({ok: false, error: e.message}), {status: 500}); }
     }
 
-    // =====================================
-    // 🎬 Emby 核心反向代理与审计
-    // =====================================
     let upstream;
     try {
       let p = url.pathname.slice(1).replace(/^(https?)\/(?!\/)/, '$1://');
@@ -467,9 +471,6 @@ export default {
   }
 };
 
-// =====================================
-// 🗄️ 数据库操作层
-// =====================================
 async function recordBasicStats(env, type, client) {
   if (!env.DB) return;
   try {
