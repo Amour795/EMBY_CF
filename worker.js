@@ -1,6 +1,6 @@
 /**
  * =================================================================================
- * Cloudflare Worker Emby 终极版 (白名单自适应 + 客户端全识别 + 极致间距)
+ * Cloudflare Worker Emby 终极版 (修复统计数据白屏 Bug + 客户端全识别)
  * =================================================================================
  */
 
@@ -54,6 +54,8 @@ const FRONTEND_HTML = `
     .modal-content { position: relative; width: 100%; max-width: 400px; background: var(--modal-bg); border-radius: 16px; padding: 1rem; }
     .st-item { display: flex; justify-content: space-between; border-bottom: 1px solid var(--border); padding: 0.4rem 0; font-size: 0.85rem;}
     .speed-number { font-size: 2.2rem; font-weight: 800; color: var(--primary); display: block; text-align: center; margin: 0.5rem 0; font-family: monospace; }
+    .stat-val { font-size: 1.5rem; font-weight: 800; color: var(--primary); }
+    .stat-label { font-size: 0.75rem; color: var(--text-soft); }
   </style>
 </head>
 <body>
@@ -75,6 +77,17 @@ const FRONTEND_HTML = `
       <div style="display: flex; gap: 0.5rem; margin-top: 0.8rem;">
         <button id="btn-open-speedtest" class="button button--primary">⚡️ 实时测速</button>
         <button id="stats-refresh" class="button button--secondary">🔄 刷新数据</button>
+      </div>
+    </div>
+
+    <div style="display:grid; grid-template-columns: 1fr 1fr; gap:0.8rem; margin-bottom:0.8rem">
+      <div class="panel" style="text-align:center; margin-bottom:0">
+        <div class="stat-val" id="total-playing">0</div>
+        <div class="stat-label">总播放量</div>
+      </div>
+      <div class="panel" style="text-align:center; margin-bottom:0">
+        <div class="stat-val" id="total-playback-info">0</div>
+        <div class="stat-label">获取链接</div>
       </div>
     </div>
 
@@ -126,27 +139,37 @@ const FRONTEND_HTML = `
     document.getElementById('auth-btn').onclick = () => checkAuth(document.getElementById('auth-input').value);
     if(API_TOKEN) checkAuth(API_TOKEN);
 
-    // 运营商汉化映射表
     const ispMap = {
       'China Mobile': '中国移动', 'China Unicom': '中国联通', 'China Telecom': '中国电信',
       'CMCC': '中国移动', 'UNICOM': '中国联通', 'CHINANET': '中国电信'
     };
 
     async function loadData() {
-      const res = await fetch('/stats', { headers: {'X-Api-Key': API_TOKEN} });
-      const payload = await res.json();
-      const d = payload.data;
-      document.getElementById('user-stats-body').innerHTML = d.userStats.map(u => '<tr><td>' + u.ip.split('.').slice(0,2).join('.') + '.*</td><td>' + u.client_name + '</td><td>' + Math.round(u.duration_sec/60) + '分</td></tr>').join('');
-      
-      const commonOpt = { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } };
-      if(trendChart) trendChart.destroy();
-      trendChart = new Chart(document.getElementById('trendChart'), {
-        type: 'line', data: { labels: d.dailyStats.map(s => s.date.slice(5)).reverse(), datasets: [{ data: d.dailyStats.map(s => s.playing_count).reverse(), borderColor: '#6366f1', fill: true, tension: 0.4 }] }, options: commonOpt
-      });
-      if(deviceChart) deviceChart.destroy();
-      deviceChart = new Chart(document.getElementById('deviceChart'), {
-        type: 'doughnut', data: { labels: d.clientStats.map(c => c.client_name), datasets: [{ data: d.clientStats.map(c => c.total_count), backgroundColor: ['#6366f1', '#10b981', '#f59e0b', '#ec4899', '#a855f7', '#0ea5e9'] }] }, options: { ...commonOpt, plugins: { legend: { display: true, position: 'right', labels: { boxWidth: 10, font: { size: 10 } } } } }
-      });
+      try {
+        const res = await fetch('/stats', { headers: {'X-Api-Key': API_TOKEN} });
+        const payload = await res.json();
+        const d = payload.data;
+        
+        // 修复：确保 total 存在才渲染，避免 JS 报错阻断整个页面
+        if (d.total) {
+          document.getElementById('total-playing').textContent = d.total.playing || 0;
+          document.getElementById('total-playback-info').textContent = d.total.playbackInfo || 0;
+        }
+
+        document.getElementById('user-stats-body').innerHTML = d.userStats.map(u => '<tr><td>' + u.ip.split('.').slice(0,2).join('.') + '.*</td><td>' + u.client_name + '</td><td>' + Math.round(u.duration_sec/60) + '分</td></tr>').join('');
+        
+        const commonOpt = { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } };
+        if(trendChart) trendChart.destroy();
+        trendChart = new Chart(document.getElementById('trendChart'), {
+          type: 'line', data: { labels: d.dailyStats.map(s => s.date.slice(5)).reverse(), datasets: [{ data: d.dailyStats.map(s => s.playing_count).reverse(), borderColor: '#6366f1', fill: true, tension: 0.4 }] }, options: commonOpt
+        });
+        if(deviceChart) deviceChart.destroy();
+        deviceChart = new Chart(document.getElementById('deviceChart'), {
+          type: 'doughnut', data: { labels: d.clientStats.map(c => c.client_name), datasets: [{ data: d.clientStats.map(c => c.total_count), backgroundColor: ['#6366f1', '#10b981', '#f59e0b', '#ec4899', '#a855f7', '#0ea5e9'] }] }, options: { ...commonOpt, plugins: { legend: { display: true, position: 'right', labels: { boxWidth: 10, font: { size: 10 } } } } }
+        });
+      } catch (e) {
+        console.error("加载数据失败:", e);
+      }
     }
 
     document.getElementById('btn-open-speedtest').onclick = () => document.getElementById('speedtest-modal').hidden = false;
@@ -208,7 +231,7 @@ export default {
     }
     if (url.pathname === '/sw.js') return new Response("self.addEventListener('fetch',()=>{})", { headers: { 'Content-Type': 'application/javascript' } });
 
-    // 💡 修复：判断 ALLOWED_COUNTRIES 是否为空，有配置才启用拦截
+    // 白名单拦截逻辑修复：只有当 ALLOWED_COUNTRIES 不为空时才拦截
     if (ALLOWED_COUNTRIES.length > 0 && request.cf?.country && !ALLOWED_COUNTRIES.includes(request.cf.country)) {
       return new Response('Blocked', { status: 403 });
     }
@@ -281,10 +304,17 @@ async function handleStatsRequest(env) {
   const batch = await env.DB.batch([
     env.DB.prepare("SELECT date, playing_count FROM auto_emby_daily_stats ORDER BY date DESC LIMIT 10"),
     env.DB.prepare("SELECT ip, client_name, SUM(duration_sec) as duration_sec FROM auto_emby_user_stats GROUP BY ip, client_name ORDER BY duration_sec DESC LIMIT 10"),
-    env.DB.prepare("SELECT client_name, SUM(count) as total_count FROM auto_emby_client_stats GROUP BY client_name ORDER BY total_count DESC LIMIT 5")
+    env.DB.prepare("SELECT client_name, SUM(count) as total_count FROM auto_emby_client_stats GROUP BY client_name ORDER BY total_count DESC LIMIT 5"),
+    // 💡 修复：确保把包含总和数据的查询重新加回 batch 数组
+    env.DB.prepare("SELECT COALESCE(SUM(playing_count),0) as playing, COALESCE(SUM(playback_info_count),0) as playbackInfo FROM auto_emby_daily_stats")
   ]);
   return new Response(JSON.stringify({
     ok: true, enabled: true,
-    data: { dailyStats: batch[0].results, userStats: batch[1].results, clientStats: batch[2].results }
+    data: { 
+      dailyStats: batch[0].results, 
+      userStats: batch[1].results, 
+      clientStats: batch[2].results,
+      total: batch[3].results[0] // 💡 修复：将总和数据一并传回前端
+    }
   }));
 }
