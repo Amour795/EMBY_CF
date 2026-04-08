@@ -1,22 +1,17 @@
 /**
  * =================================================================================
- * Cloudflare Worker Emby 终极版 v3.0 (暗门大屏 + 专线代理 + 极限加速)
+ * Cloudflare Worker Emby 终极版 (绝对稳定专线代理 + 暗门大屏 + 极限加速)
  * =================================================================================
  */
 
-// ⚠️ 核心配置区：多服务器映射表 (子域名 -> 真实源站地址)
-// 你可以在这里无限添加其他的后端服务器
-const SERVER_MAP = {
-  'amour795.cc.cd': 'https://link00.okemby.org:8443', // 默认绑定的朋友源站
-  'emby2.amour795.cc.cd': 'https://another-server.com:8096', // 备用源站示例
-  'default': 'https://link00.okemby.org:8443' // 兜底地址
-};
+// ⚠️ 核心配置区：在这里写死你朋友的源站地址
+const TARGET_EMBY_SERVER = 'https://link00.okemby.org:8443'; 
 
 const PANEL_PASSWORD = 'emby'; // 控制台访问密码
 const SPEEDTEST_CHUNK = new Uint8Array(1024 * 1024);
 
 // =====================================
-// 🧠 内存级全局配置缓存 (保护 D1 额度)
+// 🧠 内存级全局配置缓存
 // =====================================
 let CACHED_CONFIG = { allowedRegions: [], blacklist: [], expire: 0 };
 
@@ -271,10 +266,7 @@ const FRONTEND_HTML = `
 
         const d = payload.data || { dailyStats: [], userStats: [], clientStats: [], speedLogs: [], total: {playing: 0, playbackInfo: 0} };
         
-        if (d.total) {
-          document.getElementById('total-playing').textContent = d.total.playing || 0;
-          document.getElementById('total-playback-info').textContent = d.total.playbackInfo || 0;
-        }
+        if (d.total) { document.getElementById('total-playing').textContent = d.total.playing || 0; document.getElementById('total-playback-info').textContent = d.total.playbackInfo || 0; }
         
         document.getElementById('user-stats-body').innerHTML = d.userStats.map(u => 
           '<tr><td style="font-family:monospace; font-size:0.75rem; color:var(--primary);">' + formatMaskedIP(u.ip) + '</td><td style="font-size:0.8rem; word-break:break-all;">' + u.client_name + '</td><td style="font-size:0.8rem;">' + Math.round(u.duration_sec/60) + '分</td><td style="text-align:right"><button class="button" style="padding: 0.2rem 0.5rem; font-size: 0.7rem; border: 1px solid #fca5a5; color: #ef4444; background: transparent; white-space: nowrap;" onclick="banIP(\\''+u.ip+'\\')">封禁</button></td></tr>'
@@ -332,7 +324,6 @@ const FRONTEND_HTML = `
         
         const finalSpeed = parseFloat(speedEl.textContent);
         fetch('/api/speedlog', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Api-Key': API_TOKEN }, body: JSON.stringify({ loc: finalLoc, isp: finalIsp, ping: pingVal, speed_mbps: finalSpeed }) }).then(() => loadData());
-
         btn.textContent = '重新测试';
       } catch(e) { alert('测速连接中断'); }
       btn.disabled = false;
@@ -351,7 +342,6 @@ export default {
       return new Response(icon.body, { headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=604800' } });
     }
     if (url.pathname === '/manifest.json') {
-      // 💡 确保 PWA 安装时起始路由也是 /dash
       return new Response(JSON.stringify({ name: "Emby 大屏", short_name: "EmbyDash", start_url: "/dash", display: "standalone", background_color: "#f8fafc", theme_color: "#6366f1", icons: [{ src: "/icon.png", sizes: "48x48", type: "image/png" }] }), { headers: { 'Content-Type': 'application/json' } });
     }
     if (url.pathname === '/sw.js') return new Response("self.addEventListener('fetch',()=>{})", { headers: { 'Content-Type': 'application/javascript' } });
@@ -365,12 +355,14 @@ export default {
     const city = request.cf?.city || '';
     const colo = request.cf?.colo || 'N/A';
 
-    if (config.blacklist.includes(clientIp)) {
-      return new Response(getBlockedHTML(clientIp, countryCode, city, colo, 'banned'), { status: 403, headers: { 'Content-Type': 'text/html; charset=utf-8' }});
-    }
-
-    if (config.allowedRegions.length > 0 && countryCode !== 'XX' && !config.allowedRegions.includes(countryCode)) {
-      return new Response(getBlockedHTML(clientIp, countryCode, city, colo, 'region'), { status: 403, headers: { 'Content-Type': 'text/html; charset=utf-8' }});
+    // 💡 放行 /dash 路径，防止自己被黑名单或地理围栏挡住进不去后台
+    if (url.pathname !== '/dash' && !url.pathname.startsWith('/api')) {
+        if (config.blacklist.includes(clientIp)) {
+          return new Response(getBlockedHTML(clientIp, countryCode, city, colo, 'banned'), { status: 403, headers: { 'Content-Type': 'text/html; charset=utf-8' }});
+        }
+        if (config.allowedRegions.length > 0 && countryCode !== 'XX' && !config.allowedRegions.includes(countryCode)) {
+          return new Response(getBlockedHTML(clientIp, countryCode, city, colo, 'region'), { status: 403, headers: { 'Content-Type': 'text/html; charset=utf-8' }});
+        }
     }
 
     const authKey = request.headers.get('X-Api-Key');
@@ -380,7 +372,7 @@ export default {
       if (url.pathname === '/auth/verify') return new Response(JSON.stringify({ok:true}), { status: 200 });
     }
 
-    // 💡 核心改动点：大屏专属“暗门”路径，彻底让出根目录给客户端！
+    // 💡 大屏暗门：仅通过 /dash 访问
     if (url.pathname === '/dash') return new Response(FRONTEND_HTML, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
     
     // API 路由
@@ -422,19 +414,16 @@ export default {
     }
 
     // =====================================
-    // 🎬 Emby 核心反向代理 (多服务器映射)
+    // 🎬 核心：纯净的专线代理逻辑 (硬编码)
     // =====================================
-    const requestHost = request.headers.get('Host');
-    const targetServerStr = SERVER_MAP[requestHost] || SERVER_MAP['default'];
-
     let upstream = new URL(request.url);
     try {
-      const targetURL = new URL(targetServerStr);
+      const targetURL = new URL(TARGET_EMBY_SERVER);
       upstream.protocol = targetURL.protocol;
       upstream.hostname = targetURL.hostname;
       upstream.port = targetURL.port;
     } catch {
-      return new Response('Invalid Target Server Config in SERVER_MAP', { status: 500 });
+      return new Response('Invalid TARGET_EMBY_SERVER URL configured in Worker.', { status: 500 });
     }
 
     let rawClientName = request.headers.get('X-Emby-Client') || '';
@@ -466,7 +455,7 @@ export default {
     options.headers.set('Host', upstream.host);
     
     // =====================================
-    // 🚀 终极首屏加速与透传优化
+    // 🚀 首屏加速与透传优化
     // =====================================
     if (/\.(jpeg|jpg|png|gif|css|js|woff2|woff|ttf)$/i.test(upstream.pathname)) {
       options.cf = { cacheTtl: 7200, cacheEverything: true };
