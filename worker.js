@@ -1,9 +1,11 @@
 /**
  * =================================================================================
- * Cloudflare Worker Emby 终极版 v1.0 (全站监控 + 极限流媒体透传 + 测速历史)
+ * Cloudflare Worker Emby 终极版 (专线硬编码反代 + 极限流媒体透传)
  * =================================================================================
  */
 
+// ⚠️ 核心配置区
+const TARGET_EMBY_SERVER = 'https://link00.okemby.org:8443'; // 你朋友的 Emby 源站地址和端口
 const PANEL_PASSWORD = 'emby'; // 控制台访问密码
 const SPEEDTEST_CHUNK = new Uint8Array(1024 * 1024);
 
@@ -468,14 +470,17 @@ export default {
     }
 
     // =====================================
-    // 🎬 Emby 核心反向代理与客户端解析
+    // 🎬 Emby 核心反向代理 (硬编码专线模式)
     // =====================================
-    let upstream;
+    let upstream = new URL(request.url);
     try {
-      let p = url.pathname.slice(1).replace(/^(https?)\/(?!\/)/, '$1://');
-      if (!/^https?:\/\//i.test(p)) p = 'https://' + p;
-      upstream = new URL(p); upstream.search = url.search;
-    } catch { return new Response('Invalid Request', { status: 400 }); }
+      const targetURL = new URL(TARGET_EMBY_SERVER);
+      upstream.protocol = targetURL.protocol;
+      upstream.hostname = targetURL.hostname;
+      upstream.port = targetURL.port;
+    } catch {
+      return new Response('Invalid Target Server Config', { status: 500 });
+    }
 
     let rawClientName = request.headers.get('X-Emby-Client') || '';
     const userAgent = request.headers.get('User-Agent') || '';
