@@ -1,11 +1,17 @@
 /**
  * =================================================================================
- * Cloudflare Worker Emby 终极版 (专线硬编码反代 + 极限流媒体透传)
+ * Cloudflare Worker Emby 终极版 v3.0 (暗门大屏 + 专线代理 + 极限加速)
  * =================================================================================
  */
 
-// ⚠️ 核心配置区
-const TARGET_EMBY_SERVER = 'https://link00.okemby.org:8443'; // 你朋友的 Emby 源站地址和端口
+// ⚠️ 核心配置区：多服务器映射表 (子域名 -> 真实源站地址)
+// 你可以在这里无限添加其他的后端服务器
+const SERVER_MAP = {
+  'amour795.cc.cd': 'https://link00.okemby.org:8443', // 默认绑定的朋友源站
+  'emby2.amour795.cc.cd': 'https://another-server.com:8096', // 备用源站示例
+  'default': 'https://link00.okemby.org:8443' // 兜底地址
+};
+
 const PANEL_PASSWORD = 'emby'; // 控制台访问密码
 const SPEEDTEST_CHUNK = new Uint8Array(1024 * 1024);
 
@@ -94,54 +100,36 @@ const FRONTEND_HTML = `
   <link rel="icon" type="image/png" href="/icon.png">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <style>
-    :root {
-      --bg-color: #f8fafc; --panel-bg: rgba(255, 255, 255, 0.85); --modal-bg: #ffffff;
-      --text-main: #0f172a; --text-soft: #475569; --text-muted: #94a3b8;
-      --border: rgba(226, 232, 240, 0.8); --primary: #6366f1;
-      --gradient-brand: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);
-      --shadow-lg: 0 20px 40px -15px rgba(99, 102, 241, 0.15);
-    }
-    html.dark {
-      --bg-color: #0f172a; --panel-bg: rgba(30, 41, 59, 0.75); --modal-bg: #1e293b;
-      --text-main: #f8fafc; --text-soft: #cbd5e1; --text-muted: #64748b;
-      --border: rgba(51, 65, 85, 0.8); --primary: #818cf8;
-    }
+    :root { --bg-color: #f8fafc; --panel-bg: rgba(255, 255, 255, 0.85); --modal-bg: #ffffff; --text-main: #0f172a; --text-soft: #475569; --text-muted: #94a3b8; --border: rgba(226, 232, 240, 0.8); --primary: #6366f1; --gradient-brand: linear-gradient(135deg, #6366f1 0%, #a855f7 100%); --shadow-lg: 0 20px 40px -15px rgba(99, 102, 241, 0.15); }
+    html.dark { --bg-color: #0f172a; --panel-bg: rgba(30, 41, 59, 0.75); --modal-bg: #1e293b; --text-main: #f8fafc; --text-soft: #cbd5e1; --text-muted: #64748b; --border: rgba(51, 65, 85, 0.8); --primary: #818cf8; }
     * { box-sizing: border-box; transition: background-color 0.2s; }
     body { margin: 0; font-family: -apple-system, sans-serif; background-color: var(--bg-color); color: var(--text-main); min-height: 100vh; overflow-x: hidden; }
-    
     .page { padding: 1rem; width: min(100%, 1200px); margin: 0 auto; }
     .panel { background: var(--panel-bg); border: 1px solid var(--border); border-radius: 16px; box-shadow: var(--shadow-lg); backdrop-filter: blur(10px); padding: 0.8rem; margin-bottom: 0.8rem; }
-    
     .hero__title { font-size: 1.4rem; margin: 0; font-weight: 800; display: flex; align-items: center; justify-content: space-between; }
     .button { appearance: none; display: inline-flex; align-items: center; justify-content: center; gap: 0.4rem; border: none; border-radius: 999px; padding: 0.5rem 1rem; font-weight: 600; cursor: pointer; font-size: 0.85rem; }
     .button--primary { background: var(--gradient-brand); color: white; }
     .button--secondary { background: transparent; color: var(--text-main); border: 1px solid var(--border); }
     .chart-container { position: relative; height: 160px; width: 100%; }
-    
     table { width: 100%; border-collapse: collapse; font-size: 0.85rem; table-layout: fixed; }
     th, td { padding: 0.5rem 0.2rem; border-bottom: 1px solid var(--border); text-align: left; vertical-align: middle; word-wrap: break-word; }
     th { color: var(--text-soft); font-weight: 600; font-size: 0.75rem; }
-    
     #auth-screen { position: fixed; inset: 0; z-index: 9999; background: var(--bg-color); display: flex; align-items: center; justify-content: center; padding: 1rem;}
     .input-field { width: 100%; padding: 0.8rem; border-radius: 10px; border: 2px solid var(--border); background: var(--modal-bg); color: var(--text-main); margin-bottom: 1rem; outline: none;}
-    
     .modal { position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center; padding: 1rem; }
     .modal[hidden] { display: none !important; }
     .modal-overlay { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(8px); }
     .modal-content { position: relative; width: 100%; max-width: 440px; background: var(--modal-bg); border-radius: 16px; padding: 1rem; max-height: 90vh; overflow-y: auto;}
-    
     .st-item { display: flex; justify-content: space-between; border-bottom: 1px dashed var(--border); padding: 0.4rem 0; font-size: 0.85rem;}
     .speed-number { font-size: 2.2rem; font-weight: 800; color: var(--primary); display: block; text-align: center; margin: 0.5rem 0; font-family: monospace; }
     .stat-val { font-size: 1.6rem; font-weight: 800; color: var(--primary); }
     .stat-label { font-size: 0.75rem; color: var(--text-soft); margin-top: 0.2rem;}
-
     .region-cb { display: none; }
     .region-label { padding: 0.5rem 1rem; border: 1px solid var(--border); border-radius: 10px; font-size: 0.85rem; cursor: pointer; color: var(--text-soft); background: var(--modal-bg); transition: all 0.2s;}
     .region-cb:checked + .region-label { background: var(--primary-light); color: var(--primary); border-color: var(--primary); font-weight: 700; box-shadow: 0 4px 6px -1px rgba(99, 102, 241, 0.1); }
   </style>
 </head>
 <body>
-
   <div id="auth-screen">
     <div class="panel" style="width: 100%; max-width: 320px; text-align: center;">
       <h3 style="margin-top:0">🔑 身份验证</h3>
@@ -149,7 +137,6 @@ const FRONTEND_HTML = `
       <button id="auth-btn" class="button button--primary" style="width: 100%;">进入控制台</button>
     </div>
   </div>
-
   <main class="page" id="main-content" style="display: none;">
     <div class="panel">
       <div class="hero__title">
@@ -164,39 +151,25 @@ const FRONTEND_HTML = `
         <button id="stats-refresh" class="button button--secondary">🔄 刷新数据</button>
       </div>
     </div>
-
-    <div id="db-warning" style="display:none; background: #fee2e2; color: #ef4444; padding: 0.8rem; border-radius: 12px; font-size: 0.85rem; margin-bottom: 0.8rem; border: 1px solid #fca5a5;">
-      ⚠️ 数据库异常或缺失统计表，请确认已绑定 D1 数据库。
-    </div>
-
+    <div id="db-warning" style="display:none; background: #fee2e2; color: #ef4444; padding: 0.8rem; border-radius: 12px; font-size: 0.85rem; margin-bottom: 0.8rem; border: 1px solid #fca5a5;">⚠️ 数据库异常或缺失统计表，请确认已绑定 D1 数据库。</div>
     <div style="display:grid; grid-template-columns: 1fr 1fr; gap:0.8rem; margin-bottom:0.8rem">
       <div class="panel" style="text-align:center; margin-bottom:0"><div class="stat-val" id="total-playing">0</div><div class="stat-label">总播放量</div></div>
       <div class="panel" style="text-align:center; margin-bottom:0"><div class="stat-val" id="total-playback-info">0</div><div class="stat-label">获取链接</div></div>
     </div>
-
     <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 0.8rem;">
       <div class="panel"><div style="font-weight:700; font-size:0.9rem">📈 观影趋势</div><div class="chart-container"><canvas id="trendChart"></canvas></div></div>
       <div class="panel"><div style="font-weight:700; font-size:0.9rem">📱 客户端深度分布</div><div class="chart-container"><canvas id="deviceChart"></canvas></div></div>
     </div>
-
     <div class="panel">
       <div style="font-weight:700; font-size:0.9rem; margin-bottom:0.5rem">👥 活跃审计 (近10日)</div>
       <div style="overflow-x: hidden;">
         <table>
-          <thead>
-            <tr>
-              <th style="width: 35%;">IP地址</th>
-              <th style="width: 30%;">客户端 (解析)</th>
-              <th style="width: 15%;">时长</th>
-              <th style="width: 20%; text-align:right">操作</th>
-            </tr>
-          </thead>
+          <thead><tr><th style="width: 35%;">IP地址</th><th style="width: 30%;">客户端 (解析)</th><th style="width: 15%;">时长</th><th style="width: 20%; text-align:right">操作</th></tr></thead>
           <tbody id="user-stats-body"></tbody>
         </table>
       </div>
     </div>
   </main>
-
   <div id="settings-modal" class="modal" hidden>
     <div class="modal-overlay" onclick="document.getElementById('settings-modal').hidden=true"></div>
     <div class="modal-content">
@@ -208,7 +181,6 @@ const FRONTEND_HTML = `
       <button onclick="document.getElementById('settings-modal').hidden=true" class="button button--secondary" style="width: 100%; margin-top: 0.5rem;">关闭</button>
     </div>
   </div>
-
   <div id="speedtest-modal" class="modal" hidden>
     <div class="modal-overlay" onclick="document.getElementById('speedtest-modal').hidden=true"></div>
     <div class="modal-content">
@@ -220,7 +192,6 @@ const FRONTEND_HTML = `
       </div>
       <div class="speed-number"><span id="live-speed">0.00</span><small style="font-size:1rem; margin-left:4px">Mbps</small></div>
       <button id="st-start-btn" class="button button--primary" style="width: 100%; margin-top: 0.5rem; padding:0.8rem">开始实时测试</button>
-      
       <hr style="border:0; border-top:1px dashed var(--border); margin: 1.2rem 0 0.8rem 0;">
       <div style="font-size:0.85rem; font-weight:700; margin-bottom:0.5rem">🕒 历史测速记录 (最近5次)</div>
       <table style="font-size:0.75rem; margin-bottom:1rem; table-layout:auto;">
@@ -233,7 +204,6 @@ const FRONTEND_HTML = `
 
   <script>
     if ('serviceWorker' in navigator) { window.addEventListener('load', () => { navigator.serviceWorker.register('/sw.js').catch(()=>{}); }); }
-
     let trendChart, deviceChart;
     const setDark = (d) => { document.documentElement.classList.toggle('dark', d); localStorage.setItem('theme', d ? 'dark' : 'light'); };
     setDark(localStorage.getItem('theme') === 'dark');
@@ -244,12 +214,8 @@ const FRONTEND_HTML = `
       if(!token) return;
       try {
         const res = await fetch('/auth/verify', { headers: {'X-Api-Key': token} });
-        if (res.ok) {
-          API_TOKEN = token; localStorage.setItem('emby-token', token);
-          document.getElementById('auth-screen').style.display = 'none';
-          document.getElementById('main-content').style.display = 'block';
-          loadData();
-        } else { alert('面板密码不正确'); }
+        if (res.ok) { API_TOKEN = token; localStorage.setItem('emby-token', token); document.getElementById('auth-screen').style.display = 'none'; document.getElementById('main-content').style.display = 'block'; loadData(); } 
+        else { alert('面板密码不正确'); }
       } catch(e) { console.error("Auth Error", e); }
     };
     document.getElementById('auth-btn').onclick = () => checkAuth(document.getElementById('auth-input').value);
@@ -268,13 +234,11 @@ const FRONTEND_HTML = `
     };
 
     document.getElementById('save-settings-btn').onclick = async () => {
-      const btn = document.getElementById('save-settings-btn');
-      btn.disabled = true; btn.textContent = '保存中...';
+      const btn = document.getElementById('save-settings-btn'); btn.disabled = true; btn.textContent = '保存中...';
       const selected = Array.from(document.querySelectorAll('.region-cb:checked')).map(cb => cb.value);
       try {
         const res = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Api-Key': API_TOKEN }, body: JSON.stringify({ allowedRegions: selected }) });
-        if (res.ok) { alert('✅ 地区限制策略已生效！'); document.getElementById('settings-modal').hidden = true; } 
-        else { alert('保存失败，请检查 D1 数据库。'); }
+        if (res.ok) { alert('✅ 地区限制策略已生效！'); document.getElementById('settings-modal').hidden = true; } else { alert('保存失败，请检查 D1 数据库。'); }
       } catch(e) { alert('保存中断'); }
       btn.disabled = false; btn.textContent = '保存并生效';
     };
@@ -283,17 +247,13 @@ const FRONTEND_HTML = `
       if(!confirm('⚠️ 确定要永久封禁 IP: ' + ip + ' 吗？\\n封禁后该用户将无法访问源站。')) return;
       try {
         const res = await fetch('/api/ban', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Api-Key': API_TOKEN }, body: JSON.stringify({ ip }) });
-        if(res.ok) { alert('✅ 封禁成功！'); loadData(); } 
-        else { alert('封禁失败，可能缺少数据库表'); }
+        if(res.ok) { alert('✅ 封禁成功！'); loadData(); } else { alert('封禁失败，可能缺少数据库表'); }
       } catch(e) { alert('请求出错'); }
     };
 
     const formatMaskedIP = (ip) => {
       if (!ip) return '未知';
-      if (ip.includes(':')) {
-        const parts = ip.split(':');
-        return parts.length > 2 ? parts[0] + ':..:' + parts[parts.length - 1] : ip;
-      }
+      if (ip.includes(':')) { const parts = ip.split(':'); return parts.length > 2 ? parts[0] + ':..:' + parts[parts.length - 1] : ip; }
       return ip.split('.').slice(0, 2).join('.') + '.*';
     };
 
@@ -347,10 +307,8 @@ const FRONTEND_HTML = `
 
       try {
         await fetch('https://ipapi.co/json/').then(r => r.json()).then(geo => {
-          finalLoc = geo.region + ' ' + geo.city;
-          document.getElementById('st-loc').textContent = finalLoc;
-          let rawIsp = geo.org || ''; 
-          for (let key in ispMap) { if(rawIsp.toUpperCase().includes(key.toUpperCase())) { finalIsp = ispMap[key]; break; } }
+          finalLoc = geo.region + ' ' + geo.city; document.getElementById('st-loc').textContent = finalLoc;
+          let rawIsp = geo.org || ''; for (let key in ispMap) { if(rawIsp.toUpperCase().includes(key.toUpperCase())) { finalIsp = ispMap[key]; break; } }
           document.getElementById('st-isp').textContent = finalIsp;
         }).catch(() => { document.getElementById('st-loc').textContent = '定位限流'; });
 
@@ -373,11 +331,7 @@ const FRONTEND_HTML = `
         }
         
         const finalSpeed = parseFloat(speedEl.textContent);
-        fetch('/api/speedlog', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Api-Key': API_TOKEN },
-          body: JSON.stringify({ loc: finalLoc, isp: finalIsp, ping: pingVal, speed_mbps: finalSpeed })
-        }).then(() => loadData());
+        fetch('/api/speedlog', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Api-Key': API_TOKEN }, body: JSON.stringify({ loc: finalLoc, isp: finalIsp, ping: pingVal, speed_mbps: finalSpeed }) }).then(() => loadData());
 
         btn.textContent = '重新测试';
       } catch(e) { alert('测速连接中断'); }
@@ -397,7 +351,8 @@ export default {
       return new Response(icon.body, { headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=604800' } });
     }
     if (url.pathname === '/manifest.json') {
-      return new Response(JSON.stringify({ name: "Emby 大屏", short_name: "EmbyDash", start_url: "/", display: "standalone", background_color: "#f8fafc", theme_color: "#6366f1", icons: [{ src: "/icon.png", sizes: "48x48", type: "image/png" }] }), { headers: { 'Content-Type': 'application/json' } });
+      // 💡 确保 PWA 安装时起始路由也是 /dash
+      return new Response(JSON.stringify({ name: "Emby 大屏", short_name: "EmbyDash", start_url: "/dash", display: "standalone", background_color: "#f8fafc", theme_color: "#6366f1", icons: [{ src: "/icon.png", sizes: "48x48", type: "image/png" }] }), { headers: { 'Content-Type': 'application/json' } });
     }
     if (url.pathname === '/sw.js') return new Response("self.addEventListener('fetch',()=>{})", { headers: { 'Content-Type': 'application/javascript' } });
 
@@ -425,20 +380,19 @@ export default {
       if (url.pathname === '/auth/verify') return new Response(JSON.stringify({ok:true}), { status: 200 });
     }
 
+    // 💡 核心改动点：大屏专属“暗门”路径，彻底让出根目录给客户端！
+    if (url.pathname === '/dash') return new Response(FRONTEND_HTML, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+    
     // API 路由
-    if (url.pathname === '/') return new Response(FRONTEND_HTML, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
     if (url.pathname === '/stats') return handleStatsRequest(env);
     if (url.pathname === '/trace') return new Response(JSON.stringify({ ip: clientIp, colo: colo }), { headers: { 'Cache-Control': 'no-store' } });
     if (url.pathname === '/speedtest') return new Response(new ReadableStream({ start(c) { for(let i=0; i<15; i++) c.enqueue(SPEEDTEST_CHUNK); c.close(); } }), { headers: { 'Content-Type': 'application/octet-stream' } });
     
     if (url.pathname === '/api/speedlog' && request.method === 'POST') {
       try {
-        const body = await request.json();
-        if (!env.DB) throw new Error("未绑定数据库");
-        const now = new Date().toISOString();
+        const body = await request.json(); if (!env.DB) throw new Error("未绑定数据库"); const now = new Date().toISOString();
         await env.DB.prepare("CREATE TABLE IF NOT EXISTS auto_emby_speed_log (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT, ip TEXT, loc TEXT, isp TEXT, ping INTEGER, speed_mbps REAL)").run();
-        await env.DB.prepare("INSERT INTO auto_emby_speed_log (created_at, ip, loc, isp, ping, speed_mbps) VALUES (?, ?, ?, ?, ?, ?)")
-          .bind(now, clientIp, body.loc, body.isp, body.ping, body.speed_mbps).run();
+        await env.DB.prepare("INSERT INTO auto_emby_speed_log (created_at, ip, loc, isp, ping, speed_mbps) VALUES (?, ?, ?, ?, ?, ?)").bind(now, clientIp, body.loc, body.isp, body.ping, body.speed_mbps).run();
         return new Response(JSON.stringify({ok: true}));
       } catch(e) { return new Response(JSON.stringify({ok: false, error: e.message}), {status: 500}); }
     }
@@ -447,8 +401,7 @@ export default {
       if (request.method === 'GET') return new Response(JSON.stringify({ok: true, data: { allowedRegions: config.allowedRegions }}));
       if (request.method === 'POST') {
         try {
-          const body = await request.json();
-          if (!env.DB) throw new Error("未绑定数据库");
+          const body = await request.json(); if (!env.DB) throw new Error("未绑定数据库");
           await env.DB.prepare("CREATE TABLE IF NOT EXISTS auto_emby_config (key TEXT PRIMARY KEY, value TEXT)").run();
           const regionsJSON = JSON.stringify(body.allowedRegions || []);
           await env.DB.prepare("INSERT INTO auto_emby_config (key, value) VALUES ('allowed_regions', ?) ON CONFLICT(key) DO UPDATE SET value = ?").bind(regionsJSON, regionsJSON).run();
@@ -460,8 +413,7 @@ export default {
 
     if (url.pathname === '/api/ban' && request.method === 'POST') {
       try {
-        const body = await request.json();
-        if (!env.DB) throw new Error("未绑定数据库");
+        const body = await request.json(); if (!env.DB) throw new Error("未绑定数据库");
         await env.DB.prepare("CREATE TABLE IF NOT EXISTS auto_emby_blacklist (ip TEXT PRIMARY KEY, created_at TEXT)").run();
         await env.DB.prepare("INSERT INTO auto_emby_blacklist (ip, created_at) VALUES (?, ?) ON CONFLICT(ip) DO NOTHING").bind(body.ip, new Date().toISOString()).run();
         CACHED_CONFIG.blacklist.push(body.ip); CACHED_CONFIG.expire = 0; 
@@ -470,16 +422,19 @@ export default {
     }
 
     // =====================================
-    // 🎬 Emby 核心反向代理 (硬编码专线模式)
+    // 🎬 Emby 核心反向代理 (多服务器映射)
     // =====================================
+    const requestHost = request.headers.get('Host');
+    const targetServerStr = SERVER_MAP[requestHost] || SERVER_MAP['default'];
+
     let upstream = new URL(request.url);
     try {
-      const targetURL = new URL(TARGET_EMBY_SERVER);
+      const targetURL = new URL(targetServerStr);
       upstream.protocol = targetURL.protocol;
       upstream.hostname = targetURL.hostname;
       upstream.port = targetURL.port;
     } catch {
-      return new Response('Invalid Target Server Config', { status: 500 });
+      return new Response('Invalid Target Server Config in SERVER_MAP', { status: 500 });
     }
 
     let rawClientName = request.headers.get('X-Emby-Client') || '';
@@ -516,9 +471,9 @@ export default {
     if (/\.(jpeg|jpg|png|gif|css|js|woff2|woff|ttf)$/i.test(upstream.pathname)) {
       options.cf = { cacheTtl: 7200, cacheEverything: true };
     } else if (/\.(mp4|mkv|ts|webm|m3u8|flv|aac|mp3)$/i.test(upstream.pathname) || upstream.pathname.includes('/stream') || upstream.pathname.includes('/PlaybackInfo')) {
-      options.cf = { cacheTtl: 0, cacheEverything: false }; // 拒绝边缘缓冲，降低 TTFB
-      options.headers.set('Connection', 'keep-alive');      // 复用 TCP
-      options.headers.delete('Accept-Encoding');          // 💡 杀招：干掉 GZIP 压缩头，强迫源站返回原始二进制分片！
+      options.cf = { cacheTtl: 0, cacheEverything: false }; 
+      options.headers.set('Connection', 'keep-alive');      
+      options.headers.delete('Accept-Encoding');          
     }
 
     return fetch(upstream.toString(), options);
@@ -560,11 +515,8 @@ async function handleStatsRequest(env) {
     return new Response(JSON.stringify({ 
       ok: true, enabled: true, 
       data: { 
-        dailyStats: batch[0].results, 
-        userStats: batch[1].results, 
-        clientStats: batch[2].results, 
-        total: batch[3].results[0],
-        speedLogs: batch[4].results ? batch[4].results : []
+        dailyStats: batch[0].results, userStats: batch[1].results, clientStats: batch[2].results, 
+        total: batch[3].results[0], speedLogs: batch[4].results ? batch[4].results : []
       } 
     }));
   } catch (e) {
