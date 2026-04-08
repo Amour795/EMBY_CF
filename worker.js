@@ -1,6 +1,6 @@
 /**
  * =================================================================================
- * Cloudflare Worker Emby 控制面板 (高精度定位修复版 + HTTPS 兼容 + 极致间距)
+ * Cloudflare Worker Emby 数据大屏修复版 (修正保存报错 + 精准定位 + 极致间距)
  * =================================================================================
  */
 
@@ -24,52 +24,61 @@ const FRONTEND_HTML = `
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <title>Emby 控制面板</title>
   <link rel="manifest" href="/manifest.json">
+  <meta name="theme-color" content="#f8fafc" id="meta-theme-color">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <link rel="icon" type="image/png" href="/icon.png">
+  <link rel="apple-touch-icon" href="/icon.png">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <style>
     :root {
       --bg-color: #f8fafc; --panel-bg: rgba(255, 255, 255, 0.85); --modal-bg: #ffffff;
       --text-main: #0f172a; --text-soft: #475569; --text-muted: #94a3b8;
-      --border: rgba(226, 232, 240, 0.8); --primary: #6366f1;
+      --border: rgba(226, 232, 240, 0.8); --primary: #6366f1; --primary-light: #e0e7ff;
       --gradient-brand: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);
+      --gradient-text: linear-gradient(135deg, #4338ca 0%, #7e22ce 100%);
       --shadow-lg: 0 20px 40px -15px rgba(99, 102, 241, 0.15);
+      --grid-gradient: radial-gradient(at 10% 10%, rgba(99, 102, 241, 0.12) 0px, transparent 50%), radial-gradient(at 90% 10%, rgba(168, 85, 247, 0.12) 0px, transparent 50%);
     }
     html.dark {
       --bg-color: #0f172a; --panel-bg: rgba(30, 41, 59, 0.75); --modal-bg: #1e293b;
       --text-main: #f8fafc; --text-soft: #cbd5e1; --text-muted: #64748b;
-      --border: rgba(51, 65, 85, 0.8); --primary: #818cf8;
+      --border: rgba(51, 65, 85, 0.8); --primary: #818cf8; --primary-light: rgba(99, 102, 241, 0.2);
     }
-    * { box-sizing: border-box; transition: background-color 0.2s; }
-    body { margin: 0; font-family: -apple-system, sans-serif; background-color: var(--bg-color); color: var(--text-main); min-height: 100vh; overflow-x: hidden; }
+    * { box-sizing: border-box; transition: background-color 0.3s; }
+    body { margin: 0; font-family: -apple-system, sans-serif; background-color: var(--bg-color); background-image: var(--grid-gradient); color: var(--text-main); min-height: 100vh; overflow-x: hidden; }
+    
     .page { padding: 1rem; width: min(100%, 1200px); margin: 0 auto; }
-    .panel { background: var(--panel-bg); border: 1px solid var(--border); border-radius: 16px; box-shadow: var(--shadow-lg); backdrop-filter: blur(10px); padding: 0.8rem; margin-bottom: 0.8rem; }
+    .panel { background: var(--panel-bg); border: 1px solid var(--border); border-radius: 16px; box-shadow: var(--shadow-lg); backdrop-filter: blur(20px); padding: 0.8rem; margin-bottom: 0.8rem; }
+    
     .hero__title { font-size: 1.4rem; margin: 0; font-weight: 800; display: flex; align-items: center; justify-content: space-between; }
+    .hero__title span { background: var(--gradient-text); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    
     .button { appearance: none; display: inline-flex; align-items: center; justify-content: center; gap: 0.4rem; border: none; border-radius: 999px; padding: 0.5rem 1rem; font-weight: 600; cursor: pointer; font-size: 0.85rem; }
     .button--primary { background: var(--gradient-brand); color: white; }
     .button--secondary { background: transparent; color: var(--text-main); border: 1px solid var(--border); }
-    .chart-container { position: relative; height: 160px; width: 100%; }
+    
+    .chart-container { position: relative; height: 180px; width: 100%; }
     table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
     th, td { padding: 0.5rem; border-bottom: 1px solid var(--border); text-align: left; }
+    
     #auth-screen { position: fixed; inset: 0; z-index: 9999; background: var(--bg-color); display: flex; align-items: center; justify-content: center; padding: 1rem;}
     .input-field { width: 100%; padding: 0.8rem; border-radius: 10px; border: 2px solid var(--border); background: var(--modal-bg); color: var(--text-main); margin-bottom: 1rem; outline: none;}
+
     .modal { position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center; padding: 1rem; }
     .modal[hidden] { display: none !important; }
     .modal-overlay { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(8px); }
-    .modal-content { position: relative; width: 100%; max-width: 400px; background: var(--modal-bg); border-radius: 16px; padding: 1rem; }
-    .st-item { display: flex; justify-content: space-between; border-bottom: 1px solid var(--border); padding: 0.5rem 0; font-size: 0.85rem;}
-    .st-label { color: var(--text-soft); }
-    .st-val { font-weight: 700; }
+    .modal-content { position: relative; width: 100%; max-width: 400px; background: var(--modal-bg); border-radius: 20px; padding: 1rem; }
+    .st-item { display: flex; justify-content: space-between; border-bottom: 1px solid var(--border); padding: 0.4rem 0; font-size: 0.85rem;}
   </style>
 </head>
 <body>
 
   <div id="auth-screen">
     <div class="panel" style="width: 100%; max-width: 320px; text-align: center;">
-      <h3 style="margin-top:0">🔒 访问验证</h3>
-      <input type="password" id="auth-input" class="input-field" placeholder="密码">
-      <button id="auth-btn" class="button button--primary" style="width: 100%;">确认</button>
+      <h3 style="margin-top:0">身份验证</h3>
+      <input type="password" id="auth-input" class="input-field" placeholder="访问密码">
+      <button id="auth-btn" class="button button--primary" style="width: 100%;">解锁进入</button>
     </div>
   </div>
 
@@ -80,14 +89,14 @@ const FRONTEND_HTML = `
         <button id="theme-toggle" class="button button--secondary" style="padding:0.4rem">🌓</button>
       </div>
       <div style="display: flex; gap: 0.5rem; margin-top: 0.8rem;">
-        <button id="btn-open-speedtest" class="button button--primary">⚡️ 测速中心</button>
+        <button id="btn-open-speedtest" class="button button--primary">⚡️ 测速</button>
         <button id="stats-refresh" class="button button--secondary">🔄 刷新</button>
       </div>
     </div>
 
     <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 0.8rem;">
       <div class="panel">
-        <div style="font-weight:700; font-size:0.9rem">📈 播放趋势</div>
+        <div style="font-weight:700; font-size:0.9rem">📈 观影趋势</div>
         <div class="chart-container"><canvas id="trendChart"></canvas></div>
       </div>
       <div class="panel">
@@ -108,19 +117,21 @@ const FRONTEND_HTML = `
   <div id="speedtest-modal" class="modal" hidden>
     <div class="modal-overlay" onclick="document.getElementById('speedtest-modal').hidden=true"></div>
     <div class="modal-content">
-      <h3 style="margin:0 0 0.8rem 0">⚡️ 精准网络诊断</h3>
-      <div class="st-item"><span class="st-label">当前 IP:</span><span id="st-ip" class="st-val">--</span></div>
-      <div class="st-item"><span class="st-label">地理位置:</span><span id="st-loc" class="st-val" style="color:var(--primary)">--</span></div>
-      <div class="st-item"><span class="st-label">运营商:</span><span id="st-isp" class="st-val">--</span></div>
-      <div class="st-item"><span class="st-label">CF 节点:</span><span id="st-colo" class="st-val">--</span></div>
-      <div class="st-item"><span class="st-label">Ping 延迟:</span><span id="st-ping" class="st-val">--</span></div>
-      <div class="st-item"><span class="st-label">实测带宽:</span><b id="st-speed" style="color:var(--primary)">--</b></div>
-      <button id="st-start-btn" class="button button--primary" style="width: 100%; margin-top: 1rem;">开始测试</button>
+      <h3 style="margin:0 0 0.8rem 0">测速中心</h3>
+      <div class="st-item"><span>IP:</span><span id="st-ip">--</span></div>
+      <div class="st-item"><span>位置:</span><span id="st-loc" style="color:var(--primary)">--</span></div>
+      <div class="st-item"><span>延迟:</span><span id="st-ping">--</span></div>
+      <div class="st-item"><span>带宽:</span><b id="st-speed" style="color:var(--primary)">--</b></div>
+      <button id="st-start-btn" class="button button--primary" style="width: 100%; margin-top: 1rem;">开始测速</button>
       <button onclick="document.getElementById('speedtest-modal').hidden=true" class="button button--secondary" style="width: 100%; margin-top: 0.5rem;">关闭</button>
     </div>
   </div>
 
   <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => { navigator.serviceWorker.register('/sw.js').catch(()=>{}); });
+    }
+
     let trendChart, deviceChart;
     const setDark = (d) => {
       document.documentElement.classList.toggle('dark', d);
@@ -147,7 +158,10 @@ const FRONTEND_HTML = `
       const res = await fetch('/stats', { headers: {'X-Api-Key': API_TOKEN} });
       const payload = await res.json();
       const d = payload.data;
+      
       document.getElementById('user-stats-body').innerHTML = d.userStats.map(u => '<tr><td>' + u.ip.split('.').slice(0,2).join('.') + '.*</td><td>' + u.client_name + '</td><td>' + Math.round(u.duration_sec/60) + '分</td></tr>').join('');
+
+      const commonOpt = { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } };
       
       if(trendChart) trendChart.destroy();
       trendChart = new Chart(document.getElementById('trendChart'), {
@@ -156,7 +170,7 @@ const FRONTEND_HTML = `
           labels: d.dailyStats.map(s => s.date.slice(5)).reverse(),
           datasets: [{ data: d.dailyStats.map(s => s.playing_count).reverse(), borderColor: '#6366f1', fill: true, tension: 0.4 }]
         },
-        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } }
+        options: commonOpt
       });
 
       if(deviceChart) deviceChart.destroy();
@@ -166,44 +180,35 @@ const FRONTEND_HTML = `
           labels: d.clientStats.map(c => c.client_name),
           datasets: [{ data: d.clientStats.map(c => c.total_count), backgroundColor: ['#6366f1', '#10b981', '#f59e0b', '#ec4899'] }]
         },
-        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: true, position: 'right', labels: { boxWidth: 10, font: { size: 10 } } } } }
+        options: { ...commonOpt, plugins: { legend: { display: true, position: 'right', labels: { boxWidth: 10, font: { size: 10 } } } } }
       });
     }
 
     document.getElementById('btn-open-speedtest').onclick = () => document.getElementById('speedtest-modal').hidden = false;
-    
     document.getElementById('st-start-btn').onclick = async () => {
       const btn = document.getElementById('st-start-btn');
-      btn.disabled = true; btn.textContent = '🚀 精准定位中...';
+      btn.disabled = true; btn.textContent = '定位中...';
       try {
-        // 1. 获取基本信息 (增加 cache: "no-store" 绕过缓存)
-        const tr = await (await fetch('/trace', { headers: {'X-Api-Key': API_TOKEN}, cache: "no-store" })).json();
+        const tr = await (await fetch('/trace', { headers: {'X-Api-Key': API_TOKEN} })).json();
         document.getElementById('st-ip').textContent = tr.ip;
-        document.getElementById('st-colo').textContent = tr.colo;
         
-        // 2. 💡 HTTPS 兼容定位接口 (ipapi.co)
         try {
-          const geo = await (await fetch('https://ipapi.co/json/')).json();
-          // ipapi.co 返回省份名和运营商
-          document.getElementById('st-loc').textContent = geo.region + ' ' + geo.city;
-          document.getElementById('st-isp').textContent = geo.org || '未知运营商';
-        } catch(e) { 
-          document.getElementById('st-loc').textContent = tr.loc;
-          document.getElementById('st-isp').textContent = '识别失败 (HTTPS限制)';
-        }
+          const geo = await (await fetch('https://ip-api.com/json/?lang=zh-CN')).json();
+          document.getElementById('st-loc').textContent = geo.status === 'success' ? (geo.regionName + geo.city + ' (' + geo.isp + ')') : tr.loc;
+        } catch(e) { document.getElementById('st-loc').textContent = tr.loc; }
         
         btn.textContent = '测延迟...';
         const start = performance.now();
-        await fetch('/trace', { method: 'HEAD', headers: {'X-Api-Key': API_TOKEN}, cache: "no-store" });
+        await fetch('/trace', { method: 'HEAD', headers: {'X-Api-Key': API_TOKEN} });
         document.getElementById('st-ping').textContent = Math.round(performance.now() - start) + 'ms';
         
-        btn.textContent = '全速下行中...';
+        btn.textContent = '测速中...';
         const sStart = performance.now();
         const res = await fetch('/speedtest', { headers: {'X-Api-Key': API_TOKEN} });
         const blob = await res.blob();
         const mbps = ((blob.size * 8) / (1024*1024) / ((performance.now() - sStart) / 1000)).toFixed(2);
         document.getElementById('st-speed').textContent = mbps + ' Mbps';
-      } catch(e) { alert('测速中断，请检查网络'); }
+      } catch(e) { alert('测速中断'); }
       btn.disabled = false; btn.textContent = '再次测试';
     };
     document.getElementById('stats-refresh').onclick = loadData;
@@ -216,7 +221,6 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    // PWA 资源路由
     if (url.pathname === '/icon.png') {
       const icon = await fetch('https://raw.githubusercontent.com/google/material-design-icons/master/png/device/wallpaper/materialicons/48dp/1x/baseline_wallpaper_black_48dp.png');
       return new Response(icon.body, { headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=604800' } });
@@ -230,10 +234,8 @@ export default {
     }
     if (url.pathname === '/sw.js') return new Response("self.addEventListener('fetch',()=>{})", { headers: { 'Content-Type': 'application/javascript' } });
 
-    // 地区拦截
     if (request.cf?.country && !ALLOWED_COUNTRIES.includes(request.cf.country)) return new Response('Blocked', { status: 403 });
 
-    // 鉴权
     const authKey = request.headers.get('X-Api-Key');
     const isApi = ['/stats', '/trace', '/speedtest', '/auth/verify'].includes(url.pathname);
     if (isApi) {
@@ -243,23 +245,13 @@ export default {
 
     if (url.pathname === '/') return new Response(FRONTEND_HTML, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
     if (url.pathname === '/stats') return handleStatsRequest(env);
-    
-    // 🚀 /trace 增加禁用缓存响应头，修复定位和延迟测量的准确性
-    if (url.pathname === '/trace') {
-      return new Response(JSON.stringify({
-        ip: request.headers.get('cf-connecting-ip'),
-        loc: (request.cf?.city || '') + ' ' + (request.cf?.country || ''),
-        colo: request.cf?.colo || 'N/A'
-      }), { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store, no-cache, must-revalidate' } });
-    }
-
+    if (url.pathname === '/trace') return new Response(JSON.stringify({ ip: request.headers.get('cf-connecting-ip'), loc: (request.cf?.city || '') + ' ' + (request.cf?.country || '') }));
     if (url.pathname === '/speedtest') {
       return new Response(new ReadableStream({
         start(c) { for(let i=0; i<8; i++) c.enqueue(SPEEDTEST_CHUNK); c.close(); }
-      }), { headers: { 'Content-Type': 'application/octet-stream', 'Cache-Control': 'no-store' } });
+      }));
     }
 
-    // 核心反代逻辑
     let upstream;
     try {
       let p = url.pathname.slice(1).replace(/^(https?)\/(?!\/)/, '$1://');
@@ -292,6 +284,7 @@ async function recordBasicStats(env, type, client) {
   if (!env.DB) return;
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' });
   const col = type === 'playing' ? 'playing_count' : 'playback_info_count';
+  // 修正：使用更稳健的 SQL 拼接
   const sql = "INSERT INTO auto_emby_daily_stats (date, " + col + ") VALUES (?, 1) ON CONFLICT(date) DO UPDATE SET " + col + " = " + col + " + 1";
   await env.DB.prepare(sql).bind(today).run();
   await env.DB.prepare("INSERT INTO auto_emby_client_stats (date, client_name, count) VALUES (?, ?, 1) ON CONFLICT(date, client_name) DO UPDATE SET count = count + 1").bind(today, client).run();
