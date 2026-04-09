@@ -1,93 +1,91 @@
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    const path = url.pathname;
+    let targetUrlStr = "";
 
-    // --- 1. 核心逻辑：动态提取目标地址 ---
-    // 注意：浏览器和 Cloudflare 常常会把路径里的双斜杠 // 压缩成单斜杠 /
-    // 所以你输入的 https:// 到了代码里会变成 /https:/
-    const subPathPrefix = "/https:/";
-    
-    // 如果没有严格按照代理格式请求，直接拦截（没有默认站了）
-    if (!url.pathname.startsWith(subPathPrefix)) {
-      return new Response("Sikt Proxy Gateway is running. 请在 URL 后面拼接目标地址，例如: /https://v1.uhdnow.com", { 
-        status: 400,
+    // 1. 通用解析引擎：提取路径中的目标 URL (兼容 http/https 以及 CF 的单斜杠压缩)
+    const proxyRegex = /^\/(https?):\/?\/?(.*)$/;
+    const match = path.match(proxyRegex);
+
+    if (match) {
+      // 场景 A：直接带完整目标地址的请求，例如 /https://emby.example.com
+      targetUrlStr = `${match[1]}://${match[2]}${url.search}`;
+    } else {
+      // 场景 B：API 相对路径自动寻路（参考原版逻辑的核心机制）
+      // 当页面内部请求 /emby/system/info 时，通过 Referer 顺藤摸瓜找到原本代理的域名
+      const referer = request.headers.get("Referer");
+      if (referer) {
+        try {
+          const refUrl = new URL(referer);
+          const refMatch = refUrl.pathname.match(proxyRegex);
+          if (refMatch) {
+            const targetOrigin = `${refMatch[1]}://${refMatch[2].split('/')[0]}`;
+            targetUrlStr = `${targetOrigin}${path}${url.search}`;
+          }
+        } catch (e) {
+          // 解析失败静默处理
+        }
+      }
+    }
+
+    // 2. 无效请求拦截
+    if (!targetUrlStr) {
+      return new Response("🚀 Sikt Universal Proxy is running.\n\n用法: https://你的域名/https://目标地址\n例如: https://sikt.club/https://emby.xxx.com:8096", {
+        status: 200,
         headers: { "Content-Type": "text/plain; charset=utf-8" }
       });
     }
 
-    // 提取出真实的目标 URL
-    const fullTargetUrlString = "https:/" + url.pathname.slice(subPathPrefix.length) + url.search;
-    let targetHost = "";
-    let upstreamProtocol = "";
-    let finalPathAndQuery = "";
+    const targetUrl = new URL(targetUrlStr);
+
+    // 3. 构造底层请求头（全量伪装）
+    const headers = new Headers(request.headers);
+    
+    // 强行重写 Host，这是反代任意站点的铁律
+    headers.set("Host", targetUrl.host);
+    if (headers.has("Origin")) headers.set("Origin", targetUrl.origin);
+    if (headers.has("Referer")) headers.set("Referer", `${targetUrl.origin}/`);
+
+    // 扒掉所有 Cloudflare 多层代理的外套，防止被目标服务器的 WAF 拦截
+    const headersToRemove = ["cf-connecting-ip", "cf-visitor", "cf-ray", "x-forwarded-for", "x-real-ip"];
+    headersToRemove.forEach(h => headers.delete(h));
 
     try {
-      const fullTargetUrl = new URL(fullTargetUrlString);
-      targetHost = fullTargetUrl.host;
-      upstreamProtocol = fullTargetUrl.protocol;
-      finalPathAndQuery = fullTargetUrl.pathname + fullTargetUrl.search;
-    } catch (e) {
-      return new Response(`[Gateway Error] 提取目标域名失败，请检查格式是否正确。错误: ${e.message}`, { status: 400 });
-    }
+      // 4. 发起代理请求 (WebSocket 会自动透传)
+      const response = await fetch(targetUrl.href, {
+        method: request.method,
+        headers: headers,
+        body: request.body,
+        redirect: "manual" // 必须手动接管重定向，防止跳出代理环境
+      });
 
-    const upstreamUrlString = `${upstreamProtocol}//${targetHost}${finalPathAndQuery}`;
-
-    // --- 2. 构造完美伪装请求头 ---
-    const newHeaders = new Headers(request.headers);
-    newHeaders.set("Host", targetHost);
-    newHeaders.set("Referer", `${upstreamProtocol}//${targetHost}/`);
-    newHeaders.set("Origin", `${upstreamProtocol}//${targetHost}`);
-    newHeaders.set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
-
-    // 抹除代理痕迹
-    newHeaders.delete("CF-Connecting-IP");
-    newHeaders.delete("CF-Ray");
-    newHeaders.delete("X-Forwarded-Proto");
-
-    const fetchOptions = {
-      method: request.method,
-      headers: newHeaders,
-      body: request.body,
-      redirect: "manual" // 【改动】这里改为 manual 手动处理重定向，防止源站重定向导致跨域问题
-    };
-
-    try {
-      let response = await fetch(upstreamUrlString, fetchOptions);
       const responseHeaders = new Headers(response.headers);
       
-      // --- 3. 流媒体极速传输优化 ---
-      if (url.pathname.includes('/stream') || url.pathname.includes('/PlaybackInfo')) {
-         responseHeaders.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
-         responseHeaders.set('Pragma', 'no-cache');
-         responseHeaders.set('Expires', '0');
-      }
+      // 无脑放行跨域限制
+      responseHeaders.set("Access-Control-Allow-Origin", "*");
+      responseHeaders.set("Access-Control-Allow-Headers", "*");
 
-      // --- 4. 动态重定向重写（极其重要） ---
-      // 当源站（比如 Emby）要求你跳转到 /web/index.html 时，我们要把它改写回代理格式
+      // 5. 动态重定向重写
+      // 目标站如果返回 302 跳转，自动把它替换成带前缀的代理地址
       if ([301, 302, 303, 307, 308].includes(response.status)) {
-        const location = response.headers.get("Location");
+        let location = responseHeaders.get("Location");
         if (location) {
-          // 如果重定向是完整的绝对路径
-          if (location.startsWith(`${upstreamProtocol}//${targetHost}`)) {
-            const proxyPrefix = `${url.origin}${subPathPrefix}${targetHost}`;
-            const newLocation = location.replace(`${upstreamProtocol}//${targetHost}`, proxyPrefix);
-            responseHeaders.set("Location", newLocation);
-          } 
-          // 如果重定向是相对路径 (比如 /web/index.html)
-          else if (location.startsWith("/")) {
-             responseHeaders.set("Location", `${url.origin}${subPathPrefix}${targetHost}${location}`);
+          const proxyPrefix = `${url.origin}/${targetUrl.protocol.replace(':', '')}://${targetUrl.host}`;
+          if (location.startsWith(targetUrl.origin)) {
+             responseHeaders.set("Location", location.replace(targetUrl.origin, proxyPrefix));
+          } else if (location.startsWith("/")) {
+             responseHeaders.set("Location", `${proxyPrefix}${location}`);
           }
-          return new Response(null, {
-            status: response.status,
-            headers: responseHeaders
-          });
         }
       }
 
-      // --- 5. 跨域放行 ---
-      responseHeaders.set("Access-Control-Allow-Origin", "*");
-      responseHeaders.set("Access-Control-Allow-Methods", "GET, HEAD, POST, PUT, DELETE, TRACE, OPTIONS, PATCH");
-      responseHeaders.set("Access-Control-Allow-Headers", "*");
+      // 6. 核心流媒体优化
+      // 识别 Emby 的推流接口，打断 Cloudflare 边缘节点的强制缓存，解决拖动进度条卡死问题
+      const pathLower = targetUrl.pathname.toLowerCase();
+      if (pathLower.includes('/stream') || pathLower.includes('/playbackinfo') || pathLower.includes('/video')) {
+        responseHeaders.set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+      }
 
       return new Response(response.body, {
         status: response.status,
@@ -96,7 +94,7 @@ export default {
       });
 
     } catch (e) {
-      return new Response(`[ Gateway 502 ] 无法代理到目标: ${targetHost}\n网络报错: ${e.message}`, { status: 502 });
+      return new Response(`[Proxy Error] 无法连接到目标: ${targetUrlStr}\n报错详情: ${e.message}`, { status: 502 });
     }
   }
 };
