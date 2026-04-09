@@ -1,50 +1,40 @@
 export default {
   async fetch(request, env, ctx) {
-    // --- 目标源站配置 ---
-    const TARGET_HOST = "v1.uhdnow.com"; 
-    const TARGET_URL = `https://${TARGET_HOST}`;
-
+    const TARGET_HOST = "v1.uhdnow.com";
     const url = new URL(request.url);
-    // 构造发往源站的新 URL
-    const upstreamUrl = new URL(url.pathname + url.search, TARGET_URL);
-
-    // 复制原始请求头并进行修正
-    const newHeaders = new Headers(request.headers);
     
-    // 【核心操作】必须重写 Host 头部，否则对方服务器会报 403 或 SSL 错误
-    newHeaders.set("Host", TARGET_HOST);
-    
-    // 清理掉可能干扰反代的原始信息
-    newHeaders.delete("Referer");
-    newHeaders.delete("Origin");
+    // 强制修改 URL 目标
+    url.hostname = TARGET_HOST;
+    url.protocol = "https:";
+    url.port = ""; 
 
-    const modifiedRequest = new Request(upstreamUrl, {
+    // 重新构造请求，剔除掉可能引起源站报错的 Header
+    const headers = new Headers(request.headers);
+    headers.set("Host", TARGET_HOST);
+    headers.set("Referer", `https://${TARGET_HOST}/`);
+    headers.set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+
+    const newRequest = new Request(url.toString(), {
       method: request.method,
-      headers: newHeaders,
+      headers: headers,
       body: request.body,
-      redirect: "follow" 
+      redirect: "follow"
     });
 
     try {
-      const response = await fetch(modifiedRequest);
+      let response = await fetch(newRequest);
       
-      // 构造响应，允许流媒体直接通过
-      const responseHeaders = new Headers(response.headers);
-      
-      // 跨域和缓存优化
-      responseHeaders.set("Access-Control-Allow-Origin", "*");
-      if (url.pathname.includes('/stream') || url.pathname.includes('/PlaybackInfo')) {
-         responseHeaders.set('Cache-Control', 'no-store');
+      // 处理源站重定向
+      if ([301, 302].includes(response.status)) {
+        const location = response.headers.get("Location");
+        if (location) {
+          const newLocation = location.replace(`https://${TARGET_HOST}`, `https://${new URL(request.url).hostname}`);
+          return Response.redirect(newLocation, response.status);
+        }
       }
-
-      return new Response(response.body, {
-        status: response.status,
-        statusText: response.statusText,
-        headers: responseHeaders
-      });
-
+      return response;
     } catch (e) {
-      return new Response(`[Sikt-Worker] 无法连接到 UHD 源站: ${e.message}`, { status: 502 });
+      return new Response(`Worker 连不上 UHD: ${e.message}`, { status: 502 });
     }
   }
 };
